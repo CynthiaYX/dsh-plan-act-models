@@ -30,8 +30,9 @@
   两者都指向同一套文件；Release 附件是 `npm pack` 产物，`github:` 走整仓 tarball，
   仓库根就是包根，没有需要裁剪的子目录。
 
-  > 目前仓库还没有打 tag，所以上面的 Release 地址与 `#v0.2.0` 引用暂时取不到东西；
-  > 在第一个 `v*` tag 推上去之前，请用本地 tarball 安装。发布见下文「发布流程」。
+  > 当前最新 Release：**v0.2.0**（附件 `dsh-plan-act-models.tgz` 与
+  > `dsh-plan-act-models-0.2.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
+  > 把 `latest` 换成新 tag 可以锁定版本。
 
 配置入口：**设置 → 双轨 · Plan / Act 模型**（首次默认关闭）。
 
