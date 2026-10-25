@@ -1,0 +1,14 @@
+- insert:
+    - id: plan-act-models
+      name: dsh-plan-act-models
+      config:
+        enabled: false
+        plan:
+          provider: ''
+          model: ''
+          reasoningEffort: ''
+        act:
+          provider: ''
+          model: ''
+          reasoningEffort: ''
+        projects: {}

@@ -1,0 +1,7 @@
+# The GitHub archive of this repo is the install source, so the checkout has to
+# be byte-identical everywhere: LF in the tree, LF on every clone, whatever
+# core.autocrlf the machine happens to use.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary

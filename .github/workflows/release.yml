@@ -1,0 +1,52 @@
+name: release
+
+# A tag is the release trigger on purpose: pushing to `main` must never publish
+# something, and a Release asset is what dsh-market and `dsh plugin add` fetch.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # A tag that disagrees with package.json would publish a Release whose
+      # asset is named differently from the version people read in the tag.
+      - name: Tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          test "${GITHUB_REF_NAME#v}" = "$(node -p "require('./package.json').version")"
+
+      # The suite is `node:test` only and needs no running Host. On a runner
+      # without the packaged schemastery, schema.test.mjs takes its
+      # "the error must be actionable" branch rather than failing.
+      - name: Test
+        run: npm test
+
+      - name: Pack
+        run: npm pack
+
+      # `releases/latest/download/dsh-plan-act-models.tgz` is the stable URL
+      # dsh-market's catalog format uses, so the versioned asset gets a copy
+      # under that name in the same Release.
+      - name: Stable asset name
+        run: cp dsh-plan-act-models-*.tgz dsh-plan-act-models.tgz
+
+      - name: Upload assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dsh-plan-act-models-*.tgz
+            dsh-plan-act-models.tgz
+          generate_release_notes: true

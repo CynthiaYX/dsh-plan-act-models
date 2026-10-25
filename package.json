@@ -1,0 +1,59 @@
+{
+  "name": "dsh-plan-act-models",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Bind one provider, model and reasoning effort to each side of plan mode; the first request after leaving Plan uses the Act route.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CynthiaYX/dsh-plan-act-models.git"
+  },
+  "homepage": "https://github.com/CynthiaYX/dsh-plan-act-models#readme",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "plan",
+    "act",
+    "model",
+    "reasoning-effort"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/*.mjs",
+    "test/*.mjs",
+    "tools/*.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "LICENSE",
+    "README.md",
+    "INSTALL.md"
+  ],
+  "dependencies": {},
+  "scripts": {
+    "test": "node --test test/routing.test.mjs test/host.test.mjs test/index.test.mjs test/client.test.mjs test/client-bundle.test.mjs test/schema.test.mjs"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-settings"]
+    }
+  }
+}

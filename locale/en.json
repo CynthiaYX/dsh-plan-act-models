@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Two-Track · Plan / Act models",
+    "description": "Plan mode and Act mode each use their own model and reasoning effort; leaving Plan switches the next request."
+  }
+}
