@@ -12,7 +12,7 @@
 ## 安装
 
 分发包是 `dsh-plan-act-models-0.2.0.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
-完整步骤、验证清单与排错见 **[INSTALL.md](./INSTALL.md)**，两条路线摘录：
+完整步骤、验证清单与排错见 **[INSTALL.md](./INSTALL.md)**，安装路线摘录：
 
 - **桌面版**：应用内 **设置 → 插件 → 从本地文件安装** 选 tarball，然后重启应用。
   桌面 profile 由应用独占管理，外部 `dsh --profile desktop …` 会报
@@ -29,6 +29,9 @@
 
   两者都指向同一套文件；Release 附件是 `npm pack` 产物，`github:` 走整仓 tarball，
   仓库根就是包根，没有需要裁剪的子目录。
+
+  > 目前仓库还没有打 tag，所以上面的 Release 地址与 `#v0.2.0` 引用暂时取不到东西；
+  > 在第一个 `v*` tag 推上去之前，请用本地 tarball 安装。发布见下文「发布流程」。
 
 配置入口：**设置 → 双轨 · Plan / Act 模型**（首次默认关闭）。
 
