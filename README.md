@@ -56,8 +56,14 @@
 Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh-plan-act-models.tgz`
 （后者让 `releases/latest/download/dsh-plan-act-models.tgz` 这种"永远最新"的安装/更新地址可用）。
 
-1. 改 `package.json` 的 `version`，提交。
-2. `git tag v<version>` 并 `git push origin main --tags`。
+1. 改 `package.json` 的 `version`，提交并推送。
+2. 打 tag 并推送（**注意**：Windows PowerShell 5.1 不支持 `&&`，要用 `;` 或分成两行）：
+
+   ```powershell
+   git tag v<version>
+   git push origin main --tags
+   ```
+
 3. `.github/workflows/release.yml` 会先校验 tag 与 `package.json` 一致，再 `npm test`、`npm pack`，
    最后把两个 tgz 挂到该 tag 的 Release 上。
 4. 装/更新的人用 **设置 → 插件** 或 `dsh plugin add <Release 附件地址>` 即可，不需要本地构建。
