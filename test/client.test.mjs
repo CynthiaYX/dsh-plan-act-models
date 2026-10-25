@@ -48,6 +48,29 @@ test('ENTRY matches the Loader row id the bundle ships in cordis.patch.yml', () 
   assert.equal(entry[1], declared[1])
 })
 
+test('the bundle also registers the composer chip beside the model selector', () => {
+  // `conversation.input.right` is rendered immediately before
+  // `conversation.input.model` in the Host's `InputBar`, so registering there is
+  // the only way to land on the left of the native selector without patching it.
+  assert.match(source, /name: 'conversation\.input\.right'/)
+  assert.match(source, /const CHIP_ID = 'plan-act-route'/)
+  assert.match(source, /id: CHIP_ID/)
+  assert.match(source, /function RouteChip\(/)
+  assert.match(source, /ctx\.slots\.inject\('conversation\.input\.right'/)
+})
+
+test('the chip carries a mirror of resolveTarget inside a testable region', () => {
+  // The bundle cannot import `lib/routing.mjs`, so the decision table is
+  // duplicated. `test/client-view.test.mjs` extracts this exact region and
+  // compares it with the real `resolveTarget`; losing a sentinel there would
+  // silently weaken the comparison, so both are asserted here too.
+  assert.match(source, /\/\/ #region plan-act-view/)
+  assert.match(source, /\/\/ #endregion plan-act-view/)
+  assert.match(source, /function mirrorResolve\(config, path, mode\)/)
+  assert.match(source, /function routeLabel\(mode, resolved, catalog, enabled\)/)
+  assert.match(source, /const LABEL_SEPARATOR = '：'/)
+})
+
 test('the settings page never binds a locale, so the locale files are unused', () => {
   // Documented limitation: `locale/*.json` carry only a title/description and the
   // page hardcodes its strings. If that ever changes, this test should change.

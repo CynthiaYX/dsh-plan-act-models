@@ -6,32 +6,33 @@
 - 离开 Plan（Act）时，**批准 `exit_plan_mode` 之后的第一条模型请求**就换成 **Act 路由**。
 - 两组路由各自独立，可以指向不同的 provider / 连接；插件不存 API Key，全部复用宿主凭据。
 - 手动在原生模型选择器里换模型 = 当前模式的**临时覆盖**，下一次真正的 Plan↔Act 切换时清除，不会写回配置。
+- 对话框底部、原生模型选择器左侧有一个只读标签，直接显示 `模式：模型`（见[对话框里的路由标签](#对话框里的路由标签)）。
 - 配置非法时**失败关闭**：请求被阻止并报出是哪一项不合法，不静默回退、不自动换 provider。
 - 只作用于 runtime-root 会话（Web/CLI）；**不接管 subagent / 后台委派任务**。
 
 ## 安装
 
-分发包是 `dsh-plan-act-models-0.2.0.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
+分发包是 `dsh-plan-act-models-0.3.0.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
 完整步骤、验证清单与排错见 **[INSTALL.md](./INSTALL.md)**，安装路线摘录：
 
 - **桌面版**：应用内 **设置 → 插件 → 从本地文件安装** 选 tarball，然后重启应用。
   桌面 profile 由应用独占管理，外部 `dsh --profile desktop …` 会报
   `managed exclusively by the Electron application`。
-- **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.2.0.tgz"`，
+- **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.3.0.tgz"`，
   Launcher 会自动把 bundle 写进 `dsh.profile.bundles`，然后重启。
 - **直接从本仓库装**（不需要本地有 tarball）：装最新 Release 附件，或按 git 引用装源码——
 
   ```powershell
   dsh plugin --profile <profile> add "https://github.com/CynthiaYX/dsh-plan-act-models/releases/latest/download/dsh-plan-act-models.tgz"
   # 或锁定到某个 tag 的源码
-  dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.2.0"
+  dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.3.0"
   ```
 
   两者都指向同一套文件；Release 附件是 `npm pack` 产物，`github:` 走整仓 tarball，
   仓库根就是包根，没有需要裁剪的子目录。
 
-  > 当前最新 Release：**v0.2.0**（附件 `dsh-plan-act-models.tgz` 与
-  > `dsh-plan-act-models-0.2.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
+  > 当前最新 Release：**v0.3.0**（附件 `dsh-plan-act-models.tgz` 与
+  > `dsh-plan-act-models-0.3.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
   > 把 `latest` 换成新 tag 可以锁定版本。
 
 配置入口：**设置 → 双轨 · Plan / Act 模型**（首次默认关闭）。
@@ -73,7 +74,7 @@ Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh
 
 本包**尚未发布到 npm**，GitHub Release 才是当前的发布通道。发布前依次确认：
 
-1. `node --test` 全绿（56 个用例）。
+1. `node --test` 全绿（66 个用例）。
 2. `npm pack --dry-run` 的文件列表里没有 `lib/*.js`（该 glob 曾指向不存在的文件）。
 3. `package.json` 无 `private`，`license` 与 `repository` 齐全。
 4. `cordis.patch.yml` 的 `id` 与 `client.js` 的 `ENTRY` 逐字相同 —— `client.test.mjs`
@@ -96,6 +97,29 @@ Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh
 保存后按设计只影响**新会话**与**已存在会话的下一次真正的 Plan↔Act 切换**；界面没有
 「立即应用到当前会话」按钮（RooCode 同样不把临时选择写回配置）。
 
+## 对话框里的路由标签
+
+composer 底部、**原生模型选择器紧左边**有一个只读标签，文字就是 `模式：模型`（全角冒号）：
+
+| 情况 | 标签文字 |
+| --- | --- |
+| Plan 模式下路由完整 | `Plan：DeepSeek V4.1 Flash` |
+| Act 模式下路由完整 | `Act：DeepSeek V4.1 Flash` |
+| 插件总开关关闭 | `Plan：已关闭` |
+| 当前工作区在 `projects` 里被设为 `off` | `Plan：此项目已停用` |
+| 该模式的 provider/model 不完整 | `Plan：未配置` |
+
+- 模式取宿主**已提交**的 plan 状态（与宿主自身路由判定同源），不是消息里的 `/plan` 文本；
+  Plan↔Act 切换后标签跟着变。
+- 模型按「当前会话工作区根目录 → 项目覆盖 → 全局配置」解析，语义与真正发请求时的
+  `resolveTarget` 完全一致（`test/client-view.test.mjs` 用输入矩阵逐项比对两套实现）。
+- 显示名优先用模型目录里的 `name`，查不到退回 model id；**思考复杂度不进正文**，只在悬停提示里：
+  `Plan：DeepSeek V4.1 Flash — cline-pass/deepseek-v4.1-flash-1017 (max) · 全局配置`
+  （来自项目覆盖时末尾是 `· 项目覆盖：<工作区>`）。
+- 不显示的三种情况：subagent 会话（宿主从不给它们路由）、配置镜像尚未就绪
+  （`loading`/`unavailable`/`error`）、没有绑定会话。
+- **不反映原生选择器上的手动临时覆盖**：那个覆盖发生在宿主侧，标签描述的是配置本身解析出的路由。
+
 ## 状态说明
 
 设置页顶部会直接反映读取结果：
@@ -112,7 +136,8 @@ Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh
 - 路由判定读的是宿主**已提交**的 plan 状态（`agentPresets.serviceFor(agent, 'planMode').get(agent)`，
   退路是根平面的 `sessionProjections.stateOf(session, 'plan')`），不是消息里的 `/plan` 文本。
 - 不改写全局默认模型：请求在 `agent/request` 里被改写，profile 里 `agent-default-model` 保持原样。
-- 原生模型选择器上的显示可能滞后（架构优先），真实生效的路由以请求日志/插件状态为准。
+- 原生模型选择器上的显示可能滞后（架构优先），真实生效的路由以请求日志/插件状态为准；
+  对话框里的 `模式：模型` 标签描述的是**配置解析出的路由**，可以拿它对照。
 
 ## 已知限制
 
@@ -142,28 +167,41 @@ Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh
    不做 catch——一次抛出就会让该 Agent 永远 publish 不出来（对话框一直是禁用状态，必须关掉插件才能说话）。
    所以插件现在把挂载/卸载自己的任何异常就地吞掉，只在日志里告警一次并跳过该会话；其余会话不受影响。
    注意 `agent/request` 里的「配置不合法」仍然照常抛错，那是刻意保留的失败关闭。
+10. **标签不跟随原生选择器的手动临时覆盖**：临时覆盖只存在于宿主侧的会话状态里，不写回配置；
+    标签显示的是配置解析出的路由，所以两者此时会不一致（这正是「配置 vs 临时覆盖」的语义差别）。
+11. **标签沿用硬编码中文**：与设置页一致，没有走 Client locale 服务；`client.js` 里甚至不能出现
+    `locale` 字样（`test/client.test.mjs` 有既有断言）。
+12. **`conversation.input.right` 目前无人占用**，所以我们的条目稳定落在模型选择器左侧；若将来有别的
+    包也注册到同一个座位，顺序由 `order` 决定（本插件是 100），届时可能需要重新排序。
 
 ## 开发
 
 ```powershell
-# 在仓库根执行；`npm test` 也会跑同样六个文件
+# 在仓库根执行；`npm test` 也会跑同样七个文件
 $pkg = '<克隆目录>\dsh-plan-act-models'
-& $node --test "$pkg\test\routing.test.mjs" "$pkg\test\host.test.mjs" "$pkg\test\index.test.mjs" "$pkg\test\client.test.mjs" "$pkg\test\client-bundle.test.mjs" "$pkg\test\schema.test.mjs"
+& $node --test "$pkg\test\routing.test.mjs" "$pkg\test\host.test.mjs" "$pkg\test\index.test.mjs" "$pkg\test\client.test.mjs" "$pkg\test\client-view.test.mjs" "$pkg\test\client-bundle.test.mjs" "$pkg\test\schema.test.mjs"
 ```
 
 `$node` 指向安装目录里的 Node（`D:\DeepSeek Harness\resources\runtime\primary-runtime\dependencies\node\bin\node.exe`），
 或直接用系统 `node`（需 ≥ 20，仓库在 Node 24 上验证）。
 
-- 六个用例文件都只依赖 `node:test` 与包内源码，**不需要**运行中的 Host：
+- 七个用例文件都只依赖 `node:test` 与包内源码，**不需要**运行中的 Host：
   `routing.test.mjs` 跑纯决策表（模式切换、临时覆盖、项目覆盖、非法配置阻塞），
   `host.test.mjs` 直接 import `lib/host.mjs` 验证 plan 模式读取与模型目录容错，
   `index.test.mjs` **真正加载 `index.js`** 并驱动它的三个监听器，
   `client.test.mjs` 对 `client.js` 做静态回归断言，
+  `client-view.test.mjs` 从 `client.js` 里抽出 `#region plan-act-view` 那块镜像实现，用
+  输入矩阵与 `lib/routing.mjs` 的 `resolveTarget` 逐项比对，并断言标签文字是 `模式：模型`，
   `client-bundle.test.mjs` **真的执行 bundle**：伪造 `window.__ModuleLoader__` 与
   `configForms`/`slots` 两个 Service，调用 factory 拿到 module 再跑 `apply()`，断言
   注册的 settings 页 id 与传进 `configForms.get()` 的 namespace 都等于 patch 的 `id`，
+  **并真的渲染 composer 标签**（Plan/Act、项目覆盖、三种降级态、subagent 不渲染），
   `schema.test.mjs` 校验 schemastery 解析（含「旧副本缺 `.volatile()` 必须被拒绝」）。
   `schema.test.mjs` 在找不到可用副本的机器上会走「报错必须可执行」那一条分支，不会误报失败。
+- `client.js` 无法 import `lib/routing.mjs`（它是发给页面的 classic script），所以路由判定在
+  `#region plan-act-view … #endregion` 之间有一份手写镜像。`client-view.test.mjs` 靠这对哨兵
+  把镜像抽出来做等价断言：**改 `resolveTarget` 就必须同步改镜像，否则测试会红**；
+  哨兵被删会直接失败，不会静默空跑。
 - `client-bundle.test.mjs` 用 `?case=N` 查询串绕开 ESM 模块缓存：bundle 的全部效果就是那一次
   `load()` 调用，模块被缓存后第二次 import 不会重新执行。
 - `index.test.mjs` 用 `DSH_SCHEMASTER_ROOT` 在系统临时目录里造一个假的 schemastery（版本号写成

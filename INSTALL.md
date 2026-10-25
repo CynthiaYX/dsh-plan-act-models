@@ -3,7 +3,7 @@
 `dsh-plan-act-models` 是一个**纯插件**的 DSH bundle：装上即可给 Plan / Act 两种模式分别指定
 provider + model + 思考复杂度。它不改宿主代码、不存 API Key、不改写你的全局默认模型。
 
-安装包：`dsh-plan-act-models-0.2.0.tgz`（`npm pack` 产物）。别人给你的就是这个 tarball；
+安装包：`dsh-plan-act-models-0.3.0.tgz`（`npm pack` 产物）。别人给你的就是这个 tarball；
 也可以直接从 GitHub Release 取（本仓库每次打 `v*` tag 都会挂上同名的 tgz 与稳定名
 `dsh-plan-act-models.tgz`），命令里把路径或 URL 换成你手里的那份即可。
 
@@ -21,7 +21,7 @@ provider + model + 思考复杂度。它不改宿主代码、不存 API Key、�
 `profile "desktop" is managed exclusively by the Electron application`），因此必须用应用内的插件界面：
 
 1. 打开 **设置 → 插件**，进入插件管理 / 本地安装入口
-2. 选择 **从本地文件安装**，指向 `dsh-plan-act-models-0.2.0.tgz` 的绝对路径
+2. 选择 **从本地文件安装**，指向 `dsh-plan-act-models-0.3.0.tgz` 的绝对路径
 3. 等安装完成后 **重启应用**（新装的 bundle 需要重启才会被加载）
 4. 打开 **设置 → 双轨 · Plan / Act 模型**，确认页面能正常显示（不是「宿主没有提供配置项」）
 
@@ -31,10 +31,10 @@ provider + model + 思考复杂度。它不改宿主代码、不存 API Key、�
 
 ```powershell
 # 本地 tarball
-dsh plugin --profile <profile> add "C:\路径\dsh-plan-act-models-0.2.0.tgz"
+dsh plugin --profile <profile> add "C:\路径\dsh-plan-act-models-0.3.0.tgz"
 # 或：直接装最新 Release 附件 / 锁到某个 tag 的源码
 dsh plugin --profile <profile> add "https://github.com/CynthiaYX/dsh-plan-act-models/releases/latest/download/dsh-plan-act-models.tgz"
-dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.2.0"
+dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.3.0"
 ```
 
 - 安装成功后 Launcher 会把新 bundle 自动写进该 profile `package.json` 的 `dsh.profile.bundles`，
@@ -54,6 +54,10 @@ dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.2.0"
 ## 验证清单
 
 - [ ] 设置页能保存，重新打开仍是刚才的值
+- [ ] 对话框底部、**模型选择器左边**出现 `Plan：…` / `Act：…`，切 Plan↔Act 后文字跟着变
+- [ ] 悬停该标签能看到 `provider/model (effort) · 全局配置`（来自项目覆盖时是 `· 项目覆盖：<工作区>`）
+- [ ] 把某个项目设成 `off`，打开那个工作区的会话 → 标签显示 `此项目已停用`
+- [ ] 关掉总开关 → 标签显示 `已关闭`（不是整块消失）
 - [ ] 会话进入 Plan 模式 → 请求走 Plan 路由（含思考复杂度）
 - [ ] 批准 `exit_plan_mode` 后，**该轮之后的第一个请求**走 Act 路由
 - [ ] 在原生选择器里手动换模型（**只改思考复杂度也算**）→ 只是临时覆盖，下一次真正的 Plan↔Act 切换后被清除
@@ -88,6 +92,8 @@ Plan 模式下这里应当是 Plan 路由的值，Act 模式下应当是 Act 路
 | 页面显示 `宿主没有提供配置项「plan-act-models」` | 插件的 Host 半边没加载成功，先看启动日志里有没有 `plan-act-models` 相关报错 |
 | 页面显示 `读取配置失败：…` | settings 镜像报错，按提示信息排查 |
 | 保存后不生效 | 按设计只影响新会话与下一次真正的 Plan↔Act 切换；已存在的会话不会立即切换 |
+| 对话框里没有 `模式：模型` 标签 | 先确认设置页能正常读取配置（镜像未就绪时标签刻意不显示）；再看是不是 subagent 会话（宿主从不给它们路由）；最后确认 profile 安装的是不是新版 bundle |
+| 标签显示 `未配置` / `此项目已停用` | `未配置` = 该模式的 provider/model 不完整；`此项目已停用` = 当前工作区在项目覆盖里被设成 `off` |
 | 请求被阻止并提示模型不可用 | 配置里的 provider/model 与当前宿主可用目录不一致，到设置里按下拉重新选一次 |
 | 卸载 | 在插件界面移除，或从 profile `package.json` 依赖与 `dsh.profile.bundles` 中删掉该包，再重启 |
 
@@ -98,5 +104,7 @@ Plan 模式下这里应当是 Plan 路由的值，Act 模式下应当是 Act 路
 3. `system-prompt/assemble` 里的 `{{provider}}`/`{{model}}` 变量比请求路由晚一格。
 4. 路由优先级靠监听器注册顺序：插件用 `{prepend:true}` 盖过宿主的模型选择；若将来有别的包在插件
    之后也用 `prepend` 装选择，那个包会接管，本插件会把它的值当手动选择并停止改写。
+5. 对话框里的 `模式：模型` 标签描述的是**配置解析出的路由**，不是原生选择器上的手动临时覆盖。两者在
+   手动改模型后会不一致，这是刻意区分「配置」与「临时覆盖」的结果。
 
 细节见包内 `README.md`。

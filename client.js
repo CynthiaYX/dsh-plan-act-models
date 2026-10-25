@@ -8,6 +8,7 @@ window.__ModuleLoader__.load({
     const FALLBACK = 'rgba(127, 127, 127, 0.45)'
     const muted = 'var(--dsw-alias-text-secondary, #8b8b8b)'
     const danger = 'var(--dsw-alias-text-danger, #d14343)'
+    const accent = 'var(--dsw-alias-state-business-primary, #247bbf)'
     const border = `1px solid var(--dsw-alias-border, ${FALLBACK})`
     const radius = 'var(--dsw-alias-border-radius, 6px)'
 
@@ -71,6 +72,129 @@ window.__ModuleLoader__.load({
     function samevalue(left, right) {
       return JSON.stringify(left) === JSON.stringify(right)
     }
+
+    // #region plan-act-view — test/client-view.test.mjs extracts this block verbatim
+    //
+    // The composer chip has to answer "which route would the next request use"
+    // in the browser, while the Host answers the same question in
+    // `lib/routing.mjs` with `resolveTarget`. The bundle cannot import `lib/`
+    // (it is a classic script served to the page), so the decision table is
+    // mirrored here. Every function below is self-contained so the test can
+    // evaluate the region with `new Function` and compare it against the real
+    // `resolveTarget` over an input matrix — a one-sided edit fails the suite.
+
+    /** Full-width colon: the chip reads `模式：模型`. */
+    const LABEL_SEPARATOR = '：'
+    const MODE_WORDS = { plan: 'Plan', act: 'Act' }
+
+    function mirrorUnref(value) {
+      if (value === null || value === undefined) return value
+      if (typeof value !== 'object' && typeof value !== 'function') return value
+      if (typeof value.get === 'function') {
+        try {
+          return mirrorUnref(value.get())
+        } catch {
+          return undefined
+        }
+      }
+      if (typeof value === 'function') return mirrorUnref(value())
+      if (Object.prototype.hasOwnProperty.call(value, 'value') && typeof value.get !== 'function') {
+        return mirrorUnref(value.value)
+      }
+      return value
+    }
+
+    function mirrorText(value) {
+      return typeof value === 'string' ? value.trim() : ''
+    }
+
+    function mirrorRoute(input) {
+      const value = mirrorUnref(input)
+      if (value === null || typeof value !== 'object') return null
+      const provider = mirrorText(value.provider)
+      const model = mirrorText(value.model)
+      if (provider === '' || model === '') return null
+      const effort = mirrorText(value.reasoningEffort)
+      return effort === '' ? { provider, model } : { provider, model, reasoningEffort: effort }
+    }
+
+    function mirrorKey(path) {
+      const raw = mirrorText(path)
+      if (raw === '') return ''
+      return raw.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    }
+
+    function mirrorMode(entry) {
+      const value = mirrorUnref(entry)
+      if (value === null || typeof value !== 'object') return 'inherit'
+      const mode = mirrorText(value.mode)
+      return mode === 'override' || mode === 'off' ? mode : 'inherit'
+    }
+
+    function mirrorFindProject(projects, path) {
+      const table = mirrorUnref(projects)
+      const want = mirrorKey(path)
+      if (want === '' || table === null || typeof table !== 'object') return null
+      for (const key of Object.keys(table)) {
+        if (mirrorKey(key) === want) return { key, entry: mirrorUnref(table[key]) }
+      }
+      return null
+    }
+
+    /** Browser twin of `resolveTarget`: `{ kind, route, scope, projectKey }`. */
+    function mirrorResolve(config, path, mode) {
+      const hit = mirrorFindProject(config?.projects, path)
+      const entryMode = hit === null ? 'inherit' : mirrorMode(hit.entry)
+      const scope = hit === null || entryMode === 'inherit' ? 'global' : 'project'
+      const key = hit === null ? null : hit.key
+
+      if (entryMode === 'off') return { kind: 'off', scope: 'project', projectKey: key }
+
+      const source = entryMode === 'override' ? mirrorUnref(hit.entry)[mode] : mirrorUnref(config?.[mode])
+      const route = mirrorRoute(source)
+      if (route === null) return { kind: 'invalid', scope, projectKey: key }
+      return { kind: 'route', route, scope, projectKey: key }
+    }
+
+    /** Display name of a route's model, falling back to its id. */
+    function routeName(catalog, route) {
+      const groups = Array.isArray(catalog?.groups) ? catalog.groups : []
+      const group = groups.find((item) => item?.id === route.provider)
+      const models = Array.isArray(group?.models) ? group.models : []
+      const found = models.find((item) => item?.id === route.model)
+      const name = found?.name
+      return typeof name === 'string' && name.trim() !== '' ? name : route.model
+    }
+
+    /**
+     * The chip text: `模式：模型`.
+     * @param mode - `plan` | `act`
+     * @param resolved - {@link mirrorResolve} result
+     * @param catalog - model catalog, or null while it is still loading
+     * @param enabled - whether the plugin is switched on
+     */
+    function routeLabel(mode, resolved, catalog, enabled) {
+      const word = MODE_WORDS[mode] ?? MODE_WORDS.act
+      if (enabled !== true) return `${word}${LABEL_SEPARATOR}已关闭`
+      if (resolved === null || resolved === undefined) return `${word}${LABEL_SEPARATOR}未配置`
+      if (resolved.kind === 'off') return `${word}${LABEL_SEPARATOR}此项目已停用`
+      if (resolved.kind !== 'route') return `${word}${LABEL_SEPARATOR}未配置`
+      return `${word}${LABEL_SEPARATOR}${routeName(catalog, resolved.route)}`
+    }
+
+    /**
+     * Hover text: the same label, then the exact provider/model/effort and where
+     * the route comes from — the ids are what actually crosses the wire.
+     */
+    function routeTitle(mode, resolved, enabled, catalog) {
+      const label = routeLabel(mode, resolved, catalog, enabled)
+      if (enabled !== true || resolved?.kind !== 'route') return label
+      const route = resolved.route
+      const effort = route.reasoningEffort === undefined ? '' : ` (${route.reasoningEffort})`
+      const scope = resolved.scope === 'project' ? `项目覆盖：${resolved.projectKey}` : '全局配置'
+      return `${label} — ${route.provider}/${route.model}${effort} · ${scope}`
+    }
+    // #endregion plan-act-view
 
     function Row({ label, children, hint }) {
       return React.createElement(
@@ -470,10 +594,145 @@ window.__ModuleLoader__.load({
       )
     }
 
+    const CHIP_ID = 'plan-act-route'
+    const CHIP_ORDER = 100
+
+    // The composer's own tokens, so the chip sits in the toolbar like the native
+    // selector beside it: same height, same type scale, and it disappears in the
+    // compact layout the selector collapses into (`data-model-compact`).
+    const chipMuted = 'var(--dsw-alias-label-secondary, currentColor)'
+    const chipStrong = 'var(--dsw-alias-label-primary, currentColor)'
+    const chipDim = 'var(--dsw-alias-label-dimmed, currentColor)'
+
+    /** The mode word carries the one bit of colour: Plan reads as the active mode. */
+    function activated(mode, enabled, kind) {
+      if (enabled !== true || kind !== 'route') return chipDim
+      return mode === 'plan' ? accent : chipStrong
+    }
+
+    /**
+     * Read-only chip beside the native model selector: `模式：模型`.
+     *
+     * The mode is the *committed* plan state (`active === true`), the same value
+     * the Host reads when it routes, so the chip cannot disagree with the route
+     * the next request uses. The model is whatever the project override table
+     * resolves for this session's workspace root.
+     */
+    function RouteChip(props) {
+      const { form, loadCatalog } = props
+      const [snapshot, setSnapshot] = useState(() => form?.getSnapshot?.())
+      const [catalog, setCatalog] = useState(null)
+
+      const plan = typeof props.useProjection === 'function' ? props.useProjection('plan') : undefined
+      const row =
+        typeof props.useSessions === 'function'
+          ? props.useSessions((state) =>
+              props.sessionId === undefined ? undefined : state?.byId?.[props.sessionId],
+            )
+          : undefined
+
+      useEffect(() => {
+        if (!form?.subscribe) return undefined
+        return form.subscribe(() => setSnapshot(form.getSnapshot()))
+      }, [form])
+
+      useEffect(() => {
+        let cancelled = false
+        const task = typeof loadCatalog === 'function' ? loadCatalog() : null
+        Promise.resolve(task).then((value) => {
+          if (!cancelled && value !== null) setCatalog(value)
+        })
+        return () => {
+          cancelled = true
+        }
+      }, [loadCatalog])
+
+      // Subagent sessions are never routed by the Host half, so a chip there
+      // would describe a decision nobody makes.
+      if (props.sessionId === undefined) return null
+      if (row?.origin === 'subagent' || row?.parentId !== undefined) return null
+      // Nothing to say while the settings mirror has not resolved yet; the
+      // composer must not flicker a wrong route into place.
+      if (snapshot?.status !== 'ready') return null
+
+      const value = snapshot.value ?? {}
+      const enabled = value.enabled === true
+      const mode = plan?.active === true ? 'plan' : 'act'
+      const resolved = mirrorResolve(value, row?.cwd ?? '', mode)
+      const label = routeLabel(mode, resolved, catalog, enabled)
+      const head = `${MODE_WORDS[mode] ?? MODE_WORDS.act}${LABEL_SEPARATOR}`
+      const tail = label.startsWith(head) ? label.slice(head.length) : label
+
+      return React.createElement(
+        'span',
+        {
+          style: {
+            // Same compact-layout escape hatch the native selector uses: the row
+            // sets this to `none` when it collapses, hiding our text with it.
+            display: 'var(--dsh-composer-model-text-display, inline-flex)',
+            alignItems: 'center',
+            gap: 4,
+            flex: 'none',
+            height: 28,
+            minWidth: 0,
+            maxWidth: 'min(360px, 45cqw)',
+            padding: '0 4px',
+            fontSize: 13,
+            fontWeight: 400,
+            lineHeight: '20px',
+            color: chipMuted,
+            whiteSpace: 'nowrap',
+          },
+          title: routeTitle(mode, resolved, enabled, catalog),
+          'aria-label': label,
+        },
+        React.createElement(
+          'span',
+          { style: { flex: 'none', fontWeight: 500, color: activated(mode, enabled, resolved.kind) } },
+          head,
+        ),
+        React.createElement(
+          'span',
+          { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+          tail,
+        ),
+      )
+    }
+
     return {
       inject: ['slots', 'configForms', 'remote', 'remote.session'],
       apply(ctx) {
         const form = ctx.configForms.get(ENTRY)
+
+        // One shared catalog read for the chip. Started lazily on first render
+        // so `apply` stays free of I/O, and cached so every session reuses it.
+        let catalogTask
+        function loadCatalog() {
+          if (catalogTask === undefined) {
+            const remote = ctx.remote
+            catalogTask =
+              remote?.session?.modelCatalog === undefined
+                ? Promise.resolve(null)
+                : remote.session
+                    .modelCatalog()
+                    .then((response) => (response?.ok ? response.value : null))
+                    .catch(() => null)
+          }
+          return catalogTask
+        }
+
+        ctx.slots.inject('conversation.input.right', () =>
+          ctx.slots.register(
+            {
+              name: 'conversation.input.right',
+              id: CHIP_ID,
+              order: CHIP_ORDER,
+              inject: () => ({ form, loadCatalog }),
+            },
+            RouteChip,
+          ),
+        )
+
         ctx.slots.inject('settings.section', () =>
           ctx.slots.register(
             {
