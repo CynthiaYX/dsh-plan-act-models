@@ -1,13 +1,13 @@
 # <type>(<scope>): <summary>
 
-# The subject is ONE line, 20 characters or fewer, no trailing period.
-#   feat: 新增标签            <- 14 characters of summary left
-#   feat(view): 加标签        <- 8 left; scopes are expensive at this budget
-# A blank line starts the body, which says WHY, in at most 2 lines of 20.
+# The subject is ONE line, 36 characters or fewer, no trailing period.
+#   feat: 加路由标签            <- 30 characters of summary left
+#   feat(view): 加路由标签      <- 24 left; type, scope and ": " all count
+# A blank line starts the body, which says WHY, in at most 3 lines of 50.
 # If the subject already says it, delete everything below this one.
 #
 # types:  feat fix docs test refactor perf build ci chore revert style
-# scopes: view routing host client schema profile test docs
+# scopes: routing view host client schema profile test docs
 #
 # Leave one blank line before any trailer git understands
 # (Closes #12, Refs: …, Co-authored-by: …).

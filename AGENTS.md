@@ -2,10 +2,11 @@
 
 Read [CONTRIBUTING.md](./CONTRIBUTING.md) before writing a commit. In short:
 
-- Subject: `type(scope): summary` on one line, **at most 20 characters total**
-  — the type, scope, and separator all count. Drop the scope when it does not
-  fit: `feat: 加标签` leaves 14 characters, `feat(view): 加标签` leaves 8.
-- One blank line, then a body of **at most 2 lines of 20 characters**. If the
+- Subject: `type(scope): summary` on one line, **at most 36 characters total**
+  — the type, scope, and separator all count. `feat: ` leaves 30 characters,
+  `feat(view): ` leaves 24, `refactor(routing): ` leaves 17. Drop the scope
+  before shortening the summary.
+- One blank line, then a body of **at most 3 lines of 50 characters**. If the
   subject already says it, omit the body entirely; a bare subject is complete.
 - Never add attribution lines (`Generated with …`, `🤖`, AI co-author
   addresses). The message describes the change, not the tool that typed it.

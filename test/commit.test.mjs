@@ -18,13 +18,18 @@ const here = dirname(fileURLToPath(import.meta.url))
 const cli = join(here, '..', 'tools', 'commit-check.mjs')
 
 test('a conventional message passes with no errors', () => {
-  const { errors, warnings } = check('feat(view): chip\n')
+  const { errors, warnings } = check('feat(view): show the route chip\n')
   assert.deepEqual(errors, [])
   assert.deepEqual(warnings, [])
 })
 
 test('a scoped subject and a short body pass', () => {
-  const message = ['fix(route): reuse', '', 'State flips once.', 'Read old route once.'].join('\n')
+  const message = [
+    'fix(routing): reuse the Act route',
+    '',
+    'The state only flips on transition.',
+    'The next request still read the old route.',
+  ].join('\n')
   assert.deepEqual(check(message).errors, [])
 })
 
