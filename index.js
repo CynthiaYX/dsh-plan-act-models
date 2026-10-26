@@ -1,32 +1,41 @@
 /**
  * Plan/Act model router — Host half.
  *
- * The plugin never edits the Harness and never rewrites the profile default: it
- * attaches one Agent-scoped listener set to every runtime-root Agent and
- * rewrites the resolved request route when the committed plan state names the
- * other mode. Every decision lives in `lib/routing.mjs`, which has no Host
- * dependency and is unit-tested directly.
+ * The plugin makes the Plan/Act choice a *selection*, not a request rewrite. The
+ * dropdown in the composer and these two automatic rules all go through
+ * `session.selectModel`, so the Harness keeps a single notion of "which model
+ * answers next" and the native selector, the durable log and the chip agree.
+ *
+ * Two rules survive, and only two:
+ *
+ * - entering plan mode selects the configured Plan route (soft: the user may
+ *   immediately pick something else);
+ * - approving `exit_plan_mode` selects the configured Act route, ignoring
+ *   whatever was selected while planning (hard).
+ *
+ * `/plan off` is deliberately not a trigger: leaving plan mode by any route
+ * other than an approval leaves the selection alone.
+ *
+ * Every decision lives in `lib/routing.mjs`, which has no Host dependency and is
+ * unit-tested directly; the Host plumbing lives in `lib/host.mjs`.
  */
 import { loadSchema } from './lib/schema.mjs'
-import { createCatalog, createModeReader } from './lib/host.mjs'
+import { committedSelection, createCatalog, createSwitcher } from './lib/host.mjs'
 import {
-  createState,
-  decide,
-  previewRoute,
+  MODE_ACT,
+  MODE_PLAN,
   projectKey,
-  resolveTarget,
+  switchActOnApproval,
+  switchPlan,
   unref,
-  withRoute,
 } from './lib/routing.mjs'
 
 /** The profile supplies schemastery; a linked bundle cannot import it directly. */
 const z = await loadSchema()
 
 /**
- * `agents` is required; plan mode is optional so the plugin stays alive without
- * it. `agentPresets` and `sessionProjections` are read lazily through `ctx.get`
- * for the same reason: requiring them here would stop the plugin from loading at
- * all in a profile that disables those services.
+ * `agents` is required; everything else is read lazily through `ctx.get` so the
+ * plugin still loads in a profile that disables those services.
  */
 export const inject = ['agents']
 
@@ -82,154 +91,138 @@ function rootOf(agent) {
   return projectKey(agent?.session?.header?.cwd ?? '')
 }
 
-/** A resumed session already has a request header written by an earlier run. */
-function resumed(agent) {
-  return agent?.session?.requestHeader?.() !== undefined
-}
-
 /**
  * Mount the router.
  * @param ctx - Host plugin context.
  * @param config - validated Config.
  */
 export function apply(ctx, config) {
-  const states = new Map()
   const attached = new WeakSet()
+  /** Strong set so `ctx.effect` teardown can dispose the listeners it mounted. */
+  const live = new Set()
 
   ctx.inject(['settings'], (child) => {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
 
-  const modeOf = createModeReader({
-    agentPresets: () => ctx.get('agentPresets'),
-    projections: () => ctx.get('sessionProjections'),
+  const projections = () => ctx.get('sessionProjections')
+  const { assertServable } = createCatalog({ llm: () => ctx.get('llm'), ttlMs: CATALOG_TTL_MS })
+  const select = createSwitcher({
+    sessionController: () => ctx.get('sessionController'),
+    projections,
+    assertServable,
     warn: (message) => ctx.logger?.warn?.(message),
   })
 
-  const { assertServable } = createCatalog({ llm: () => ctx.get('llm'), ttlMs: CATALOG_TTL_MS })
+  /**
+   * Run a switch without letting a rejection escape into the Host's event loop.
+   * The switcher already reports its own failures; this only stops an unexpected
+   * bug from surfacing as an unhandled rejection in the session log.
+   */
+  function schedule(promise) {
+    void Promise.resolve(promise).catch(() => {})
+  }
 
   /**
-   * Whether a resolved request config already equals the wanted route.
-   * @param resolved - what the inner listeners resolved.
-   * @param route - the route this plugin wants.
+   * Report a configuration that silently disables an automatic rule.
+   *
+   * A route with no provider/model cannot be selected, and staying quiet would
+   * leave the user with a plan-mode switch that simply does nothing. Once per
+   * track is enough; the settings page is where it gets fixed.
    */
-  function alreadyRouted(resolved, route) {
-    return (
-      resolved?.provider === route.provider
-      && resolved?.model === route.model
-      && (resolved?.reasoningEffort ?? '') === (route.reasoningEffort ?? '')
+  const incompleteReported = new Set()
+  function reportIncomplete(track, verdict) {
+    if (verdict.action !== 'pass' || verdict.reason !== 'route-incomplete') return
+    if (incompleteReported.has(track)) return
+    incompleteReported.add(track)
+    const label = track === MODE_PLAN ? 'Plan' : 'Act'
+    ctx.logger?.warn?.(
+      `[plan-act-models] ${label} 路由缺少 provider 或 model，自动切换已跳过；`
+      + '请在“设置 → 双轨 · Plan / Act 模型”里补全。',
     )
   }
 
   /**
-   * Rewrite one resolved request route.
-   * A throw here ends the turn with a visible failure row — the fail-closed
-   * path. Deliberately not `agent/pre-step` rejection: a persistent reject
-   * leaves Plan mode's committed transition pending and can wedge the switch.
+   * The hard rule: an approved plan always carries out on the Act route.
+   *
+   * Only `exit_plan_mode` returning `approved: true` counts. Falling back to the
+   * absence of plan mode would fire on `/plan off` too, and the user asked for
+   * exactly the opposite there.
    */
-  function requestListener(agent, state) {
-    return async (_payload, next) => {
-      const resolved = await next()
+  function onToolResult(agent) {
+    return (exec, result) => {
+      if (exec?.name !== 'exit_plan_mode') return
+      if (result?.isError === true) return
+      if (result?.value?.approved !== true) return
       const cfg = readConfig(config)
-      const mode = modeOf(agent)
-      const target = resolveTarget(cfg, rootOf(agent), mode)
-      const verdict = decide(state, { enabled: cfg.enabled, mode, resolved, target })
-      if (verdict.action === 'block') throw new Error(verdict.message)
-      if (verdict.action !== 'route') return resolved
-      if (alreadyRouted(resolved, verdict.route)) return resolved
-      await assertServable(verdict.route)
-      return withRoute(resolved, verdict.route)
-    }
-  }
-
-  /** Keep the assembly variables in step with the route the next request uses. */
-  function assembleListener(agent, state) {
-    return async (assembly, _context, next) => {
-      const assembled = await next()
-      const cfg = readConfig(config)
-      const target = resolveTarget(cfg, rootOf(agent), modeOf(agent))
-      const route = cfg.enabled ? previewRoute(state, target) : null
-      if (route === null) return assembled
-      return {
-        ...assembled,
-        variables: { ...assembled.variables, provider: route.provider, model: route.model },
-      }
+      const verdict = switchActOnApproval({
+        enabled: cfg.enabled,
+        config: cfg,
+        path: rootOf(agent),
+        current: committedSelection(projections, agent?.session),
+      })
+      reportIncomplete(MODE_ACT, verdict)
+      if (verdict.action !== 'select') return
+      schedule(select(agent, verdict.route, idOf(agent)))
     }
   }
 
   /**
-   * Drop the Harness's own "[model changed: …]" notice when this plugin is the
-   * one routing. That notice describes the session's own selection, which the
-   * plugin overrides, so keeping it would state the opposite of the truth — and
-   * it would repeat on every step while the two selections differ.
+   * The soft rule: entering plan mode selects the Plan route.
+   *
+   * `plan/mode` is the only committed signal every entry and exit path emits, so
+   * one listener here covers `/plan`, the Plan chip and any future control
+   * without the plugin touching plan mode itself.
    */
-  function preStepListener(agent, state) {
-    return async (_payload, next) => {
-      const decision = await next()
-      if (decision.kind === 'reject') return decision
-      const cfg = readConfig(config)
-      if (!cfg.enabled) return decision
-      const target = resolveTarget(cfg, rootOf(agent), modeOf(agent))
-      if (previewRoute(state, target) === null) return decision
-      const kept = decision.messages.filter(
-        (message) => message?.source?.kind !== 'model-selection',
-      )
-      if (kept.length === decision.messages.length) return decision
-      if (kept.length === 0) {
-        // Never hand the step an empty batch when the notice was the only input.
-        return decision.kind === 'enter' ? { ...decision, messages: decision.messages.slice(-1) } : decision
-      }
-      return { ...decision, messages: kept }
+  ctx.on('session/event', (session, event) => {
+    if (event?.type !== 'plan/mode') return
+    if (event?.data?.active !== true) return
+    let agent
+    try {
+      agent = ctx.agents.get(session.id)
+    } catch {
+      agent = undefined
     }
-  }
+    if (agent === undefined) return
+    const cfg = readConfig(config)
+    const verdict = switchPlan({
+      enabled: cfg.enabled,
+      config: cfg,
+      path: projectKey(session.header?.cwd ?? ''),
+      current: committedSelection(projections, session),
+      mode: MODE_PLAN,
+    })
+    reportIncomplete(MODE_PLAN, verdict)
+    if (verdict.action !== 'select') return
+    schedule(select(agent, verdict.route, session.id))
+  })
 
   /**
    * Report a bug inside the plugin instead of letting it escape.
    *
    * `attach` runs synchronously inside the Host's `agent/created` serial, and
    * that serial does not catch: one throw there stops the Agent from ever being
-   * published and leaves the session unusable (no composer, no replies) — a far
-   * worse outcome than simply not re-routing that Agent. So attachment and
-   * detachment swallow their own failures and say so once.
-   *
-   * Request-time failures are deliberately NOT caught here: a `block` verdict
-   * must surface as a visible error row, which is the documented fail-closed
-   * behaviour.
+   * published and leaves the session unusable. So attachment and detachment
+   * swallow their own failures and say so once, and the Agent keeps working
+   * without automatic switching.
    */
   let reported = false
   function report(error) {
     if (reported) return
     reported = true
     const detail = error instanceof Error ? error.message : String(error)
-    ctx.logger?.warn?.(`[plan-act-models] 无法为该会话挂载路由，已跳过（其余会话不受影响）：${detail}`)
+    ctx.logger?.warn?.(`[plan-act-models] 无法为该会话挂载切换器，已跳过（其余会话不受影响）：${detail}`)
   }
 
-  /** Attach one Agent-scoped listener set, once. */
+  /** Attach the Agent-scoped listener, once. */
   function attach(raw) {
     const agent = agentOf(raw)
     if (agent === undefined || attached.has(agent)) return
     if (agent.session?.header?.origin === 'subagent') return
     attached.add(agent)
     try {
-      const state = createState({ mode: modeOf(agent), resumed: resumed(agent) })
-      const id = idOf(agent)
-      if (id !== undefined) states.set(id, { state, agent })
-      const disposeRequest = agent.ctx.on('agent/request', requestListener(agent, state), {
-        prepend: true,
-      })
-      const disposeAssemble = agent.ctx.on('system-prompt/assemble', assembleListener(agent, state), {
-        prepend: true,
-      })
-      const disposePreStep = agent.ctx.on('agent/pre-step', preStepListener(agent, state), {
-        prepend: true,
-      })
-      state.detach = () => {
-        disposeRequest()
-        disposeAssemble()
-        disposePreStep()
-        attached.delete(agent)
-        if (id !== undefined) states.delete(id)
-      }
+      agent.disposeToolResult = agent.ctx.on('tools/result', onToolResult(agent))
+      live.add(agent)
     } catch (error) {
       attached.delete(agent)
       report(error)
@@ -239,9 +232,11 @@ export function apply(ctx, config) {
   function drop(raw) {
     try {
       const agent = agentOf(raw)
-      const id = idOf(agent ?? raw)
-      const entry = id === undefined ? undefined : states.get(id)
-      entry?.state.detach?.()
+      if (agent === undefined) return
+      attached.delete(agent)
+      live.delete(agent)
+      agent.disposeToolResult?.()
+      agent.disposeToolResult = undefined
     } catch (error) {
       report(error)
     }
@@ -252,7 +247,7 @@ export function apply(ctx, config) {
 
   // A Loader reload or a settings write that re-activates the plugin starts a
   // new `apply` while Agent listeners may already be gone; adopt the Agents
-  // that already exist so routing continues where it left off.
+  // that already exist so switching continues where it left off.
   try {
     for (const agent of ctx.agents.roots?.() ?? []) attach(agent)
   } catch (error) {
@@ -260,14 +255,6 @@ export function apply(ctx, config) {
   }
 
   ctx.effect(() => () => {
-    for (const { state } of [...states.values()]) {
-      try {
-        state.detach?.()
-      } catch (error) {
-        report(error)
-      }
-    }
-    states.clear()
+    for (const agent of [...live]) drop(agent)
   })
 }
-

@@ -1,9 +1,12 @@
 /**
- * Validation tests for the settings page's `routeError` table.
+ * Static assertions about `client.js`.
  *
- * `client.js` is a `window.__ModuleLoader__` bundle, so the whole file cannot be
- * imported. The validation rule it applies is duplicated here from the source,
- * and `client.test.mjs` separately asserts the bundle registers correctly.
+ * The bundle cannot be imported as a module (it registers through
+ * `window.__ModuleLoader__`), so the behavioural half lives in
+ * `test/client-bundle.test.mjs`. This file pins the things that would be easy to
+ * delete by accident and whose absence the runtime tests might not notice: the
+ * Loader row id agreement, the mirror sentinels, and the fact that a pick goes
+ * through the Host's `session.selectModel` rather than an event of our own.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -17,7 +20,7 @@ const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
 test('the settings page validates every project override, not just the global pair', () => {
   // Regression guard: the validation used to cover only `draft.plan`/`draft.act`,
   // so an enabled config with an incomplete `override` project saved cleanly and
-  // then blocked every request in that project at runtime.
+  // then made that project's entries unselectable at runtime.
   assert.match(
     source,
     /for \(const \[key, entry\] of Object\.entries\(draft\.projects \?\? \{\}\)\)/,
@@ -48,27 +51,62 @@ test('ENTRY matches the Loader row id the bundle ships in cordis.patch.yml', () 
   assert.equal(entry[1], declared[1])
 })
 
-test('the bundle also registers the composer chip beside the model selector', () => {
+test('the bundle registers the mode dropdown beside the model selector', () => {
   // `conversation.input.right` is rendered immediately before
   // `conversation.input.model` in the Host's `InputBar`, so registering there is
   // the only way to land on the left of the native selector without patching it.
   assert.match(source, /name: 'conversation\.input\.right'/)
   assert.match(source, /const CHIP_ID = 'plan-act-route'/)
   assert.match(source, /id: CHIP_ID/)
-  assert.match(source, /function RouteChip\(/)
+  assert.match(source, /function RouteSelect\(/)
   assert.match(source, /ctx\.slots\.inject\('conversation\.input\.right'/)
 })
 
-test('the chip carries a mirror of resolveTarget inside a testable region', () => {
-  // The bundle cannot import `lib/routing.mjs`, so the decision table is
-  // duplicated. `test/client-view.test.mjs` extracts this exact region and
-  // compares it with the real `resolveTarget`; losing a sentinel there would
-  // silently weaken the comparison, so both are asserted here too.
+test('the dropdown is a real <select>, not a decorative label', () => {
+  // The whole point of the change: the old component rendered a `<span>` that
+  // only described the route. A `<select>` gives keyboard operation and an
+  // accessible name for free, and matches the settings page.
+  assert.match(source, /React\.createElement\(\s*'select'/)
+  assert.match(source, /'aria-label': label/)
+  assert.match(source, /onChange: \(event\) => \{/)
+  assert.match(source, /'option'/)
+})
+
+test('choosing an entry commits through the Host’s own session.selectModel', () => {
+  // Not an event of our own: `selectModel` validates the route, updates the
+  // `modelSelection` projection every client reads, and writes the pick into the
+  // session log — so the dropdown and the native selector cannot disagree.
+  assert.match(source, /remote\.session\.selectModel\(request\)/)
+  assert.match(source, /inject: \['slots', 'configForms', 'remote', 'remote\.session'\]/)
+  assert.match(source, /code: 'NO_REMOTE'/)
+})
+
+test('the route payload omits an empty effort instead of sending one', () => {
+  assert.match(source, /\.\.\.route\.reasoningEffort === undefined \? \{\} : \{ reasoningEffort: route\.reasoningEffort \}/)
+})
+
+test('the control carries a mirror of resolveTarget and sessionTrack in a testable region', () => {
+  // The bundle cannot import `lib/routing.mjs`, so both tables are duplicated.
+  // `test/client-view.test.mjs` extracts this exact region and compares them with
+  // the real functions; losing a sentinel there would silently weaken the
+  // comparison, so both are asserted here too.
   assert.match(source, /\/\/ #region plan-act-view/)
   assert.match(source, /\/\/ #endregion plan-act-view/)
   assert.match(source, /function mirrorResolve\(config, path, mode\)/)
-  assert.match(source, /function routeLabel\(mode, resolved, catalog, enabled\)/)
+  assert.match(source, /function mirrorTrackOf\(selection, config, path, mode\)/)
+  assert.match(source, /function mirrorSameTrack\(selection, wanted\)/)
+  assert.match(source, /function routeLabel\(track, resolved, catalog\)/)
+  assert.match(source, /function customLabel\(selection, catalog\)/)
   assert.match(source, /const LABEL_SEPARATOR = '：'/)
+})
+
+test('the retired wording is gone', () => {
+  // `Act：已关闭` claimed the entry itself was dead when the switch was off; it is
+  // not — only the automatic rule stops. The title still says `自动切换已关闭`,
+  // which is why this matches the labelled form rather than the bare word.
+  assert.doesNotMatch(source, /：已关闭/)
+  assert.doesNotMatch(source, /功能已关闭/)
+  assert.doesNotMatch(source, /function RouteChip\(/)
 })
 
 test('the settings page never binds a locale, so the locale files are unused', () => {

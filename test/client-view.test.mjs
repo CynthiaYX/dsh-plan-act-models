@@ -1,14 +1,15 @@
 /**
- * The composer chip must agree with the Host, and say `模式：模型`.
+ * The composer control must agree with the Host, and say `模式：模型`.
  *
  * Two independent things can rot here, so both are pinned:
  *
  * 1. **Mirror drift.** `client.js` is a classic script served to the page, so it
  *    cannot import `lib/routing.mjs`; it carries a hand-written copy of
- *    `resolveTarget`. A one-sided edit would leave the chip describing a route
- *    the Host never takes — the exact failure this file exists to catch. The
- *    region between `#region plan-act-view` and `#endregion` is extracted from
- *    the real source and compared with the real `resolveTarget` over a matrix.
+ *    `resolveTarget` and `sessionTrack`. A one-sided edit would leave the
+ *    dropdown describing a track the Host never takes — the exact failure this
+ *    file exists to catch. The region between `#region plan-act-view` and
+ *    `#endregion` is extracted from the real source and compared with the real
+ *    functions over a matrix.
  * 2. **Label text.** The user asked for `模式：模型` with a full-width colon;
  *    the format is asserted on the real `routeLabel` output, not by grep.
  */
@@ -18,7 +19,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-import { resolveTarget } from '../lib/routing.mjs'
+import { resolveTarget, sessionTrack } from '../lib/routing.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
@@ -43,8 +44,13 @@ function loadMirror() {
        mirrorRoute,
        mirrorKey,
        mirrorMode,
+       mirrorSameTrack,
+       mirrorTrackOf,
        routeLabel,
+       routeDetail,
        routeTitle,
+       customLabel,
+       customTitle,
        routeName,
        LABEL_SEPARATOR,
        MODE_WORDS,
@@ -172,6 +178,26 @@ const MATRIX = [
   },
 ]
 
+/**
+ * The selections to run both `sessionTrack` implementations over.
+ *
+ * The interesting values are the near-misses: same provider+model with another
+ * effort, same effort with another model, and a route neither track names.
+ */
+const SELECTIONS = [
+  null,
+  undefined,
+  {},
+  { provider: 'p', model: 'm', reasoningEffort: 'max' },
+  { provider: 'p', model: 'm', reasoningEffort: 'high' },
+  { provider: 'p', model: 'm' },
+  { provider: 'p', model: 'm', reasoningEffort: 'low' },
+  { provider: 'p', model: 'zzz', reasoningEffort: 'max' },
+  { provider: 'q', model: 'n', reasoningEffort: 'max' },
+  { provider: 'q', model: 'n' },
+  { provider: '  p  ', model: ' m ', reasoningEffort: ' max ' },
+]
+
 function pair(projects) {
   return {
     plan: { provider: 'p', model: 'm', reasoningEffort: 'max' },
@@ -188,7 +214,7 @@ function override() {
   }
 }
 
-/** The fields the chip actually renders from. */
+/** The fields the control actually renders from. */
 function comparable(target) {
   return { kind: target.kind, route: target.route ?? null, scope: target.scope, projectKey: target.projectKey ?? null }
 }
@@ -203,6 +229,34 @@ test('the mirrored resolver matches lib/routing.mjs on every input', () => {
   }
 })
 
+test('the mirrored track finder matches lib/routing.mjs on every combination', () => {
+  const configs = [
+    pair(),
+    pair({ 'd:/repo': override() }),
+    pair({ 'd:/repo': { mode: 'off' } }),
+    { plan: { provider: 'p', model: 'm' }, act: { provider: 'p', model: 'm' }, projects: {} },
+    { plan: { provider: 'p', model: 'm', reasoningEffort: 'max' }, act: { provider: 'p', model: 'm', reasoningEffort: 'max' } },
+    {},
+    undefined,
+  ]
+  const paths = ['', 'C:/work', 'd:/repo', 'd:/repo/']
+  const modes = ['plan', 'act']
+  for (const config of configs) {
+    for (const path of paths) {
+      for (const mode of modes) {
+        for (const selection of SELECTIONS) {
+          assert.equal(
+            mirror.mirrorTrackOf(selection, config, path, mode),
+            sessionTrack(selection, config, path, mode),
+            `mirror diverged from sessionTrack for ${JSON.stringify(selection)} with `
+            + `${JSON.stringify(config)} at ${path} in ${mode}`,
+          )
+        }
+      }
+    }
+  }
+})
+
 test('the mirrored helpers agree with their originals in isolation', () => {
   assert.equal(mirror.mirrorKey('D:\\Work\\Repo\\'), 'd:/work/repo')
   assert.equal(mirror.mirrorKey(''), '')
@@ -212,37 +266,67 @@ test('the mirrored helpers agree with their originals in isolation', () => {
   assert.equal(mirror.mirrorRoute({ provider: 'p' }), null)
 })
 
-test('the chip reads `模式：模型`', () => {
+test('mirrorSameTrack follows the effort only when the route pins one', () => {
+  assert.equal(mirror.mirrorSameTrack({ provider: 'p', model: 'm' }, { provider: 'p', model: 'm', reasoningEffort: 'max' }), false)
+  assert.equal(mirror.mirrorSameTrack({ provider: 'p', model: 'm', reasoningEffort: 'max' }, { provider: 'p', model: 'm' }), true)
+  assert.equal(mirror.mirrorSameTrack({ provider: 'p', model: 'm', reasoningEffort: 'max' }, { provider: 'p', model: 'm', reasoningEffort: 'max' }), true)
+  assert.equal(mirror.mirrorSameTrack({ provider: 'p', model: 'n' }, { provider: 'p', model: 'm' }), false)
+})
+
+test('the control reads `模式：模型`', () => {
   assert.equal(mirror.LABEL_SEPARATOR, '：', 'the separator is the full-width colon')
   const config = pair()
   const catalog = { groups: [{ id: 'p', models: [{ id: 'm', name: 'DeepSeek V4.1 Flash' }] }] }
 
   assert.equal(
-    mirror.routeLabel('plan', mirror.mirrorResolve(config, '', 'plan'), catalog, true),
+    mirror.routeLabel('plan', mirror.mirrorResolve(config, '', 'plan'), catalog),
     'Plan：DeepSeek V4.1 Flash',
   )
   assert.equal(
-    mirror.routeLabel('act', mirror.mirrorResolve(config, '', 'act'), catalog, true),
+    mirror.routeLabel('act', mirror.mirrorResolve(config, '', 'act'), catalog),
     'Act：DeepSeek V4.1 Flash',
   )
 })
 
 test('an unknown model falls back to its id instead of rendering "undefined"', () => {
   const config = { plan: { provider: 'p', model: 'unknown-model' } }
-  assert.equal(mirror.routeLabel('plan', mirror.mirrorResolve(config, '', 'plan'), null, true), 'Plan：unknown-model')
-  assert.equal(mirror.routeLabel('plan', mirror.mirrorResolve(config, '', 'plan'), {}, true), 'Plan：unknown-model')
+  assert.equal(mirror.routeLabel('plan', mirror.mirrorResolve(config, '', 'plan'), null), 'Plan：unknown-model')
+  assert.equal(mirror.routeLabel('plan', mirror.mirrorResolve(config, '', 'plan'), {}), 'Plan：unknown-model')
 })
 
-test('the three degraded states say what they are, never a stale model', () => {
+test('the two degraded states say what they are, never a stale model', () => {
   const config = pair({ 'd:/repo': { mode: 'off' } })
-  assert.equal(mirror.routeLabel('plan', mirror.mirrorResolve(config, 'd:/repo', 'plan'), null, true), 'Plan：此项目已停用')
-  assert.equal(mirror.routeLabel('plan', mirror.mirrorResolve({}, '', 'plan'), null, true), 'Plan：未配置')
-  assert.equal(mirror.routeLabel('act', mirror.mirrorResolve(config, '', 'act'), null, false), 'Act：已关闭')
+  assert.equal(mirror.routeLabel('plan', mirror.mirrorResolve(config, 'd:/repo', 'plan'), null), 'Plan：此项目已停用')
+  assert.equal(mirror.routeLabel('plan', mirror.mirrorResolve({}, '', 'plan'), null), 'Plan：未配置')
+})
+
+test('an off switch no longer changes the label: only automatic switching stops', () => {
+  // The previous version rendered `Act：已关闭` when `enabled` was false, which
+  // claimed the dropdown was dead. It is not: a manual pick always works.
+  const label = mirror.routeLabel('act', mirror.mirrorResolve(pair(), '', 'act'), null)
+  assert.equal(label, 'Act：m')
+  assert.doesNotMatch(label, /已关闭/)
+})
+
+test('the placeholder option names the model the session is actually on', () => {
+  const catalog = { groups: [{ id: 'p', models: [{ id: 'm', name: 'DeepSeek V4.1 Flash' }] }] }
+  assert.equal(
+    mirror.customLabel({ provider: 'p', model: 'm', reasoningEffort: 'high' }, catalog),
+    '自定义：DeepSeek V4.1 Flash',
+  )
+  assert.equal(mirror.customLabel(null, catalog), '自定义：未选择')
+  assert.match(mirror.customLabel({ provider: 'p', model: 'm' }, null), /^自定义：m$/)
 })
 
 test('the hover title carries the exact route plus where it came from', () => {
   const config = pair({ 'd:/repo': override() })
-  const title = mirror.routeTitle('plan', mirror.mirrorResolve(config, 'd:/repo', 'plan'), true)
+  const title = mirror.routeTitle('plan', mirror.mirrorResolve(config, 'd:/repo', 'plan'), null)
   assert.match(title, /^Plan：n — q\/n \(max\) · 项目覆盖：/)
-  assert.match(mirror.routeTitle('act', mirror.mirrorResolve(pair(), '', 'act'), true), /· 全局配置$/)
+  assert.match(mirror.routeTitle('act', mirror.mirrorResolve(pair(), '', 'act'), null), /· 全局配置$/)
+  assert.equal(mirror.routeDetail(mirror.mirrorResolve({}, '', 'plan')), null)
+})
+
+test('the placeholder title spells the ids out', () => {
+  assert.match(mirror.customTitle({ provider: 'p', model: 'm', reasoningEffort: 'low' }), /^自定义 — p\/m \(low\)$/)
+  assert.match(mirror.customTitle(null), /^自定义 — 当前会话还没有选定模型$/)
 })

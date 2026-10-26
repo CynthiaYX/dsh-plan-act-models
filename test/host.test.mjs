@@ -1,5 +1,6 @@
 /**
- * Tests for `lib/host.mjs`: the plan-mode lookup and the provider catalog.
+ * Tests for `lib/host.mjs`: the provider catalog, the committed-selection reader
+ * and the switcher.
  *
  * These exercise the real helpers `index.js` wires up. `index.js` itself cannot
  * be imported here because it resolves schemastery from a packaged Host.
@@ -7,72 +8,139 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createCatalog, createModeReader } from '../lib/host.mjs'
+import { committedSelection, createCatalog, createSwitcher, trackWord } from '../lib/host.mjs'
 
-const AGENT = { ctx: {}, session: { header: { cwd: '/w' } } }
+const AGENT = { id: 'sess-1', ctx: {}, session: { header: { cwd: '/w' } } }
+const ACT_ROUTE = { provider: 'cline-pass', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' }
 
-function reader(services) {
-  const warnings = []
-  const modeOf = createModeReader({
-    agentPresets: () => services.agentPresets,
-    projections: () => services.sessionProjections,
-    warn: (message) => warnings.push(message),
-  })
-  return { modeOf, warnings }
+// --- committedSelection ----------------------------------------------------
+
+/** A `sessionProjections` stand-in reporting one `modelSelection` state. */
+function projectionsOf(state) {
+  return { stateOf: (_session, key) => (key === 'modelSelection' ? state : undefined) }
 }
 
-test('plan mode is read through the per-agent preset lookup', () => {
-  const { modeOf, warnings } = reader({
-    agentPresets: {
-      serviceFor: (_agent, name) => (name === 'planMode' ? { get: () => ({ active: true }) } : undefined),
+test('committedSelection prefers the pending selection over the last one', () => {
+  const state = { pending: ACT_ROUTE, lastUsed: { provider: 'x', model: 'y' } }
+  assert.deepEqual(committedSelection(() => projectionsOf(state), AGENT.session), ACT_ROUTE)
+})
+
+test('committedSelection falls back to lastUsed when nothing is pending', () => {
+  const lastUsed = { provider: 'x', model: 'y' }
+  assert.deepEqual(committedSelection(() => projectionsOf({ pending: null, lastUsed }), AGENT.session), lastUsed)
+})
+
+test('committedSelection reports nothing for a cold session', () => {
+  assert.equal(committedSelection(() => projectionsOf({ pending: null, lastUsed: null }), AGENT.session), null)
+  assert.equal(committedSelection(() => undefined, AGENT.session), null)
+  assert.equal(committedSelection(() => ({ stateOf: () => { throw new Error('gone') } }), AGENT.session), null)
+})
+
+test('trackWord names the two mode ids', () => {
+  assert.equal(trackWord('plan'), 'Plan')
+  assert.equal(trackWord('act'), 'Act')
+})
+
+// --- createSwitcher --------------------------------------------------------
+
+/**
+ * A switcher wired to fakes.
+ * @param options.controller - the `sessionController` service, or undefined.
+ * @param options.state - the `modelSelection` projection state.
+ * @param options.servable - thrown error for `assertServable`, if any.
+ */
+function switcherOf({ controller, state = null, servable = null } = {}) {
+  const warnings = []
+  const calls = []
+  const service = controller === undefined || controller === null
+    ? undefined
+    : {
+        selectModel: async (request) => {
+          calls.push(request)
+          if (typeof controller === 'function') return controller(request)
+          return { selected: request }
+        },
+        ...controller,
+      }
+  const select = createSwitcher({
+    sessionController: () => service,
+    projections: () => (state === null ? undefined : projectionsOf(state)),
+    assertServable: async () => {
+      if (servable !== null) throw servable
     },
+    warn: (message) => warnings.push(message),
   })
-  assert.equal(modeOf(AGENT), 'plan')
+  return { select, warnings, calls }
+}
+
+test('the switcher commits an unselected route through selectModel', async () => {
+  const { select, calls, warnings } = switcherOf({ controller: {} })
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), true)
+  assert.deepEqual(calls, [{
+    sessionId: 'sess-1',
+    provider: 'cline-pass',
+    model: 'deepseek-v4.1-flash',
+    reasoningEffort: 'high',
+  }])
   assert.deepEqual(warnings, [])
 })
 
-test('the root-plane planMode service is NOT reachable, so the projection decides', () => {
-  // This is the original bug: `ctx.get('planMode')` is a different realm symbol,
-  // so a Host exposing it only at the root plane leaves `serviceFor` empty.
-  const { modeOf } = reader({
-    planMode: { get: () => ({ active: true }) },
-    sessionProjections: { stateOf: (_session, key) => (key === 'plan' ? { active: true } : undefined) },
+test('the switcher omits reasoningEffort when the route does not pin one', async () => {
+  const { select, calls } = switcherOf({ controller: {} })
+  await select(AGENT, { provider: 'p', model: 'm' }, 'sess-1')
+  assert.equal('reasoningEffort' in calls[0], false)
+})
+
+test('the switcher skips a selection the session already committed', async () => {
+  const { select, calls, warnings } = switcherOf({
+    controller: {},
+    state: { pending: null, lastUsed: { ...ACT_ROUTE } },
   })
-  assert.equal(modeOf(AGENT), 'plan')
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), false)
+  assert.deepEqual(calls, [])
+  assert.deepEqual(warnings, [])
 })
 
-test('the projection fallback works when no preset registry is present', () => {
-  const { modeOf } = reader({
-    sessionProjections: { stateOf: (_session, key) => (key === 'plan' ? { active: false } : undefined) },
+test('the switcher still commits when only the effort differs', async () => {
+  const { select, calls } = switcherOf({
+    controller: {},
+    state: { pending: null, lastUsed: { provider: ACT_ROUTE.provider, model: ACT_ROUTE.model } },
   })
-  assert.equal(modeOf(AGENT), 'act')
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), true)
+  assert.equal(calls.length, 1)
 })
 
-test('act mode from the preset controller', () => {
-  const { modeOf } = reader({
-    agentPresets: { serviceFor: () => ({ get: () => ({ active: false, pending: false }) }) },
+test('an unservable route is reported once and never reaches selectModel', async () => {
+  const { select, calls, warnings } = switcherOf({
+    controller: {},
+    servable: new Error('provider「p」下没有模型「m」'),
   })
-  assert.equal(modeOf(AGENT), 'act')
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), false)
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), false)
+  assert.deepEqual(calls, [])
+  assert.equal(warnings.length, 1, 'the catalog degradation is reported exactly once')
+  assert.match(warnings[0], /不切换/)
 })
 
-test('a missing plan source warns once instead of silently routing Act', () => {
-  const { modeOf, warnings } = reader({})
-  assert.equal(modeOf(AGENT), 'act')
-  assert.equal(modeOf(AGENT), 'act')
-  assert.equal(warnings.length, 1, 'the degradation must be reported exactly once')
-  assert.match(warnings[0], /Act/)
-})
-
-test('a throwing plan source degrades instead of failing the request', () => {
-  const { modeOf, warnings } = reader({
-    sessionProjections: {
-      stateOf: () => {
-        throw new Error('plan-mode requires the plan session projection')
-      },
+test('a rejecting selectModel is contained and reported once', async () => {
+  const { select, warnings } = switcherOf({
+    controller: () => {
+      throw Object.assign(new Error('session/model-unavailable'), { code: 'session/model-unavailable' })
     },
   })
-  assert.equal(modeOf(AGENT), 'act')
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), false)
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), false)
   assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /切换模型失败/)
+  assert.match(warnings[0], /model-unavailable/)
+})
+
+test('a missing sessionController degrades with a pointer to the native selector', async () => {
+  const { select, warnings } = switcherOf({ controller: null })
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), false)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /sessionController/)
+  assert.match(warnings[0], /原生模型选择器/)
 })
 
 function catalogOf(llm, ttlMs) {
@@ -226,13 +294,14 @@ test('an unknown model and an unknown provider get distinct messages', async () 
   }
   const { assertServable } = catalogOf(llm)
   await assert.rejects(() => assertServable({ provider: 'p', model: 'other' }), /下没有模型「other」/)
-  await assert.rejects(() => assertServable({ provider: 'nope', model: 'm' }), /当前不可用/)
+  await assert.rejects(() => assertServable({ provider: 'nope', model: 'm' }), /provider「nope」不可用/)
 })
 
-test('a missing llm service fails closed as documented', async () => {
+test('a missing llm service lets the switch through to the Host validator', async () => {
+  // The catalog is an early, friendlier check, not the authority: without it the
+  // switcher still calls `selectModel`, which re-validates and reports its own
+  // error. Blocking here would make the dropdown useless in a profile that only
+  // hides `llm` from this plugin.
   const { assertServable } = catalogOf(undefined)
-  await assert.rejects(
-    () => assertServable({ provider: 'p', model: 'm' }),
-    /宿主没有提供 llm 服务/,
-  )
+  await assert.doesNotReject(() => assertServable({ provider: 'p', model: 'm' }))
 })

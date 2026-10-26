@@ -156,6 +156,37 @@ window.__ModuleLoader__.load({
       return { kind: 'route', route, scope, projectKey: key }
     }
 
+    /**
+     * Browser twin of `sameTrack`: a configured route that leaves the effort
+     * empty follows the model default, and the Host writes that default back
+     * into the committed selection, so an empty configured effort matches any.
+     */
+    function mirrorSameTrack(selection, wanted) {
+      const current = mirrorRoute(selection)
+      const target = mirrorRoute(wanted)
+      if (current === null || target === null) return false
+      if (current.provider !== target.provider || current.model !== target.model) return false
+      if (target.reasoningEffort === undefined) return true
+      return current.reasoningEffort === target.reasoningEffort
+    }
+
+    /**
+     * Browser twin of `sessionTrack`: which track the committed selection sits
+     * on, or null when it is neither (`mode` only breaks a tie).
+     */
+    function mirrorTrackOf(selection, config, path, mode) {
+      const current = mirrorRoute(selection)
+      if (current === null) return null
+      const plan = mirrorResolve(config, path, 'plan')
+      const act = mirrorResolve(config, path, 'act')
+      const onPlan = plan.kind === 'route' && mirrorSameTrack(current, plan.route)
+      const onAct = act.kind === 'route' && mirrorSameTrack(current, act.route)
+      if (onPlan && onAct) return mode === 'plan' ? 'plan' : 'act'
+      if (onPlan) return 'plan'
+      if (onAct) return 'act'
+      return null
+    }
+
     /** Display name of a route's model, falling back to its id. */
     function routeName(catalog, route) {
       const groups = Array.isArray(catalog?.groups) ? catalog.groups : []
@@ -167,15 +198,13 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The chip text: `模式：模型`.
-     * @param mode - `plan` | `act`
-     * @param resolved - {@link mirrorResolve} result
+     * The option text: `模式：模型`.
+     * @param track - `plan` | `act`
+     * @param resolved - {@link mirrorResolve} result for that track
      * @param catalog - model catalog, or null while it is still loading
-     * @param enabled - whether the plugin is switched on
      */
-    function routeLabel(mode, resolved, catalog, enabled) {
-      const word = MODE_WORDS[mode] ?? MODE_WORDS.act
-      if (enabled !== true) return `${word}${LABEL_SEPARATOR}已关闭`
+    function routeLabel(track, resolved, catalog) {
+      const word = MODE_WORDS[track] ?? MODE_WORDS.act
       if (resolved === null || resolved === undefined) return `${word}${LABEL_SEPARATOR}未配置`
       if (resolved.kind === 'off') return `${word}${LABEL_SEPARATOR}此项目已停用`
       if (resolved.kind !== 'route') return `${word}${LABEL_SEPARATOR}未配置`
@@ -183,16 +212,38 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Hover text: the same label, then the exact provider/model/effort and where
-     * the route comes from — the ids are what actually crosses the wire.
+     * The text of the placeholder option: whatever the session is on when that
+     * is neither configured track — a model the user picked in the native
+     * selector. It is shown, never offered.
      */
-    function routeTitle(mode, resolved, enabled, catalog) {
-      const label = routeLabel(mode, resolved, catalog, enabled)
-      if (enabled !== true || resolved?.kind !== 'route') return label
+    function customLabel(selection, catalog) {
+      const route = mirrorRoute(selection)
+      if (route === null) return `自定义${LABEL_SEPARATOR}未选择`
+      return `自定义${LABEL_SEPARATOR}${routeName(catalog, route)}`
+    }
+
+    /** `provider/model (effort) · scope` — the ids that actually cross the wire. */
+    function routeDetail(resolved) {
+      if (resolved?.kind !== 'route') return null
       const route = resolved.route
       const effort = route.reasoningEffort === undefined ? '' : ` (${route.reasoningEffort})`
       const scope = resolved.scope === 'project' ? `项目覆盖：${resolved.projectKey}` : '全局配置'
-      return `${label} — ${route.provider}/${route.model}${effort} · ${scope}`
+      return `${route.provider}/${route.model}${effort} · ${scope}`
+    }
+
+    /** Hover text for an option: its label, then where the route comes from. */
+    function routeTitle(track, resolved, catalog) {
+      const label = routeLabel(track, resolved, catalog)
+      const detail = routeDetail(resolved)
+      return detail === null ? label : `${label} — ${detail}`
+    }
+
+    /** Hover text for the placeholder option. */
+    function customTitle(selection) {
+      const route = mirrorRoute(selection)
+      if (route === null) return `自定义 — 当前会话还没有选定模型`
+      const effort = route.reasoningEffort === undefined ? '' : ` (${route.reasoningEffort})`
+      return `自定义 — ${route.provider}/${route.model}${effort}`
     }
     // #endregion plan-act-view
 
@@ -377,7 +428,7 @@ window.__ModuleLoader__.load({
         setBusy(false)
         setMessage(
           ok
-            ? '已保存。新会话立即生效；已存在的会话在下一次真正的 Plan/Act 切换时生效。'
+            ? '已保存。下拉框里的两项立即按新配置显示；自动切换在下一个事件生效。'
             : '保存失败（可能是配置已被改动）。已重新载入最新值，请再试一次。',
         )
       }, [blocked, draft, form, routes, snapshot?.revision])
@@ -422,7 +473,8 @@ window.__ModuleLoader__.load({
           React.createElement(
             'p',
             { style: { margin: 0, color: muted, fontSize: 12 } },
-            'Plan 模式使用一组模型与思考复杂度；离开 Plan 之后（含批准 exit_plan_mode 后的第一条请求）使用另一组。',
+            '这两组路由是「模式下拉框」的两项。输入框旁的下拉框始终可用，手动选择随时生效；',
+            '下面的开关只控制自动切换：进入 Plan 模式时自动选 Plan，批准计划后强制选 Act。',
           ),
         ),
         React.createElement(
@@ -433,7 +485,7 @@ window.__ModuleLoader__.load({
             checked: draft.enabled,
             onChange: (event) => setDraft({ ...draft, enabled: event.target.checked }),
           }),
-          React.createElement('span', null, '启用自动切换'),
+          React.createElement('span', null, '启用自动切换（下拉框手选不受影响）'),
         ),
         blocked
           ? React.createElement('div', { style: { color: danger, fontSize: 12 } }, routes.join('；'))
@@ -597,33 +649,37 @@ window.__ModuleLoader__.load({
     const CHIP_ID = 'plan-act-route'
     const CHIP_ORDER = 100
 
-    // The composer's own tokens, so the chip sits in the toolbar like the native
-    // selector beside it: same height, same type scale, and it disappears in the
-    // compact layout the selector collapses into (`data-model-compact`).
-    const chipMuted = 'var(--dsw-alias-label-secondary, currentColor)'
+    // The composer's own tokens, so the control sits in the toolbar like the
+    // native selector beside it: same height, same type scale, and it disappears
+    // in the compact layout the selector collapses into (`data-model-compact`).
     const chipStrong = 'var(--dsw-alias-label-primary, currentColor)'
     const chipDim = 'var(--dsw-alias-label-dimmed, currentColor)'
-
-    /** The mode word carries the one bit of colour: Plan reads as the active mode. */
-    function activated(mode, enabled, kind) {
-      if (enabled !== true || kind !== 'route') return chipDim
-      return mode === 'plan' ? accent : chipStrong
-    }
+    const chipError = 'var(--dsw-alias-label-danger, #d14343)'
 
     /**
-     * Read-only chip beside the native model selector: `模式：模型`.
+     * The mode dropdown beside the native model selector.
      *
-     * The mode is the *committed* plan state (`active === true`), the same value
-     * the Host reads when it routes, so the chip cannot disagree with the route
-     * the next request uses. The model is whatever the project override table
-     * resolves for this session's workspace root.
+     * Choosing an entry calls the Host's own `session.selectModel`, exactly what
+     * the native selector does, so the two controls can never disagree and the
+     * choice survives a restart through the `model/selection` projection.
+     *
+     * The displayed track is derived from the *committed* selection rather than
+     * from plan mode, which is what makes the control honest: after a hand-pick
+     * that matches neither configured route it shows `自定义：<model>` instead of
+     * claiming a track the session is not on.
      */
-    function RouteChip(props) {
-      const { form, loadCatalog } = props
+    function RouteSelect(props) {
+      const { form, loadCatalog, select, canSelect } = props
       const [snapshot, setSnapshot] = useState(() => form?.getSnapshot?.())
       const [catalog, setCatalog] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [failure, setFailure] = useState(null)
 
       const plan = typeof props.useProjection === 'function' ? props.useProjection('plan') : undefined
+      const selection =
+        typeof props.useProjection === 'function'
+          ? props.useProjection('modelSelection')
+          : undefined
       const row =
         typeof props.useSessions === 'function'
           ? props.useSessions((state) =>
@@ -647,8 +703,8 @@ window.__ModuleLoader__.load({
         }
       }, [loadCatalog])
 
-      // Subagent sessions are never routed by the Host half, so a chip there
-      // would describe a decision nobody makes.
+      // Subagent sessions are never switched by the Host half, so a control
+      // there would describe a decision nobody makes.
       if (props.sessionId === undefined) return null
       if (row?.origin === 'subagent' || row?.parentId !== undefined) return null
       // Nothing to say while the settings mirror has not resolved yet; the
@@ -658,17 +714,58 @@ window.__ModuleLoader__.load({
       const value = snapshot.value ?? {}
       const enabled = value.enabled === true
       const mode = plan?.active === true ? 'plan' : 'act'
-      const resolved = mirrorResolve(value, row?.cwd ?? '', mode)
-      const label = routeLabel(mode, resolved, catalog, enabled)
-      const head = `${MODE_WORDS[mode] ?? MODE_WORDS.act}${LABEL_SEPARATOR}`
-      const tail = label.startsWith(head) ? label.slice(head.length) : label
+      const cwd = row?.cwd ?? ''
+      const committed = selection?.next ?? selection?.lastUsed ?? null
+      const track = mirrorTrackOf(committed, value, cwd, mode)
+
+      const targets = {
+        plan: mirrorResolve(value, cwd, 'plan'),
+        act: mirrorResolve(value, cwd, 'act'),
+      }
+      // An entry is offered only when it names a route the Host can switch to; an
+      // incomplete one or a disabled project is shown but not selectable, so the
+      // option still explains itself instead of vanishing.
+      const offerable = (name) => targets[name].kind === 'route' && canSelect === true
+      const label = track === null ? customLabel(committed, catalog) : routeLabel(track, targets[track], catalog)
+      // Say why the control is inert instead of letting a pick fail. `canSelect`
+      // is false only when the Host has no `session.selectModel` at all.
+      const reason =
+        canSelect !== true ? ' · 宿主不支持切换模型' : enabled ? '' : ' · 自动切换已关闭'
+      const title = `${track === null ? customTitle(committed) : routeTitle(track, targets[track], catalog)}${reason}`
+
+      function choose(name) {
+        if (name === track) return undefined
+        const target = targets[name]
+        if (target?.kind !== 'route' || canSelect !== true) return undefined
+        const route = target.route
+        setBusy(true)
+        setFailure(null)
+        return Promise.resolve(
+          select({
+            sessionId: props.sessionId,
+            provider: route.provider,
+            model: route.model,
+            ...route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort },
+          }),
+        )
+          .then((response) => {
+            if (response?.ok === false) {
+              const code = response?.error?.code ?? 'REMOTE'
+              setFailure(`${code}: ${response?.error?.message ?? '切换失败'}`)
+            }
+          })
+          .catch((error) => setFailure(error?.message ?? String(error)))
+          .then(() => setBusy(false))
+      }
+
+      const options = [track === null ? 'custom' : null, 'plan', 'act'].filter((item) => item !== null)
 
       return React.createElement(
         'span',
         {
           style: {
             // Same compact-layout escape hatch the native selector uses: the row
-            // sets this to `none` when it collapses, hiding our text with it.
+            // sets this to `none` when it collapses, hiding our control with it.
             display: 'var(--dsh-composer-model-text-display, inline-flex)',
             alignItems: 'center',
             gap: 4,
@@ -676,26 +773,69 @@ window.__ModuleLoader__.load({
             height: 28,
             minWidth: 0,
             maxWidth: 'min(360px, 45cqw)',
-            padding: '0 4px',
-            fontSize: 13,
-            fontWeight: 400,
-            lineHeight: '20px',
-            color: chipMuted,
+            color: chipStrong,
             whiteSpace: 'nowrap',
           },
-          title: routeTitle(mode, resolved, enabled, catalog),
-          'aria-label': label,
+          title: failure === null ? title : `${title}\n${failure}`,
         },
         React.createElement(
-          'span',
-          { style: { flex: 'none', fontWeight: 500, color: activated(mode, enabled, resolved.kind) } },
-          head,
+          'select',
+          {
+            'aria-label': label,
+            style: {
+              // A native `<select>` (not a custom popup): it is keyboard operable,
+              // matches the settings page, and needs no dependency. `appearance`
+              // strips the platform chrome so it reads as composer text.
+              appearance: 'none',
+              WebkitAppearance: 'none',
+              background: 'transparent',
+              border: 'none',
+              padding: '0 2px',
+              margin: 0,
+              font: 'inherit',
+              fontSize: 13,
+              fontWeight: 500,
+              lineHeight: '20px',
+              textAlign: 'left',
+              maxWidth: '100%',
+              minWidth: 0,
+              cursor: canSelect === true ? 'pointer' : 'default',
+              color: busy ? chipDim : track === null ? chipDim : track === 'plan' ? accent : chipStrong,
+            },
+            value: track === null ? 'custom' : track,
+            disabled: busy,
+            onChange: (event) => {
+              choose(event.target.value)
+            },
+          },
+          options.map((name) => {
+            if (name === 'custom') {
+              return React.createElement(
+                'option',
+                { key: 'custom', value: 'custom', disabled: true, title: customTitle(committed) },
+                label,
+              )
+            }
+            const target = targets[name]
+            return React.createElement(
+              'option',
+              {
+                key: name,
+                value: name,
+                disabled: !offerable(name),
+                title: routeTitle(name, target, catalog),
+              },
+              routeLabel(name, target, catalog),
+            )
+          }),
         ),
-        React.createElement(
-          'span',
-          { style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-          tail,
-        ),
+        failure === null
+          ? null
+          : React.createElement(
+              'span',
+              { style: { fontSize: 11, color: chipError, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' } },
+              failure,
+            ),
       )
     }
 
@@ -704,8 +844,8 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const form = ctx.configForms.get(ENTRY)
 
-        // One shared catalog read for the chip. Started lazily on first render
-        // so `apply` stays free of I/O, and cached so every session reuses it.
+        // One shared catalog read for the dropdown. Started lazily on first
+        // render so `apply` stays free of I/O, and cached so sessions reuse it.
         let catalogTask
         function loadCatalog() {
           if (catalogTask === undefined) {
@@ -721,15 +861,36 @@ window.__ModuleLoader__.load({
           return catalogTask
         }
 
+        /**
+         * Commit a route the way the native selector does.
+         *
+         * This is the Host's public `session.selectModel`, not an event of our
+         * own: it validates the route, updates the `modelSelection` projection
+         * every client reads, and writes the choice into the session log — the
+         * same three effects a pick in the native selector has.
+         */
+        function select(request) {
+          const remote = ctx.remote
+          if (remote?.session?.selectModel === undefined) {
+            return { ok: false, error: { code: 'NO_REMOTE', message: '宿主没有提供 selectModel' } }
+          }
+          return remote.session.selectModel(request)
+        }
+
         ctx.slots.inject('conversation.input.right', () =>
           ctx.slots.register(
             {
               name: 'conversation.input.right',
               id: CHIP_ID,
               order: CHIP_ORDER,
-              inject: () => ({ form, loadCatalog }),
+              inject: () => ({
+                form,
+                loadCatalog,
+                select,
+                canSelect: typeof ctx.remote?.session?.selectModel === 'function',
+              }),
             },
-            RouteChip,
+            RouteSelect,
           ),
         )
 

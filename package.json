@@ -1,8 +1,8 @@
 {
   "name": "dsh-plan-act-models",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
-  "description": "Bind one provider, model and reasoning effort to each side of plan mode; the first request after leaving Plan uses the Act route.",
+  "description": "A Plan/Act dropdown in the composer that commits through the Host's own model selection, plus two optional automatic switches.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,6 +15,7 @@
     "plan",
     "act",
     "model",
+    "model-selection",
     "reasoning-effort"
   ],
   "exports": {

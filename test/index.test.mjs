@@ -2,16 +2,20 @@
  * Entry-point tests: load the REAL `index.js` and drive its listeners.
  *
  * This file exists because its absence shipped a broken release. A refactor moved
- * the host helpers into `lib/host.mjs` and dropped the `rootOf`/`resumed` call
- * sites in the entry; every test still passed, because nothing imported
- * `index.js` — the suite only exercised `lib/`. Meanwhile the Host could not
- * activate the plugin at all (`fiberPhase: "failed"`).
+ * the host helpers into `lib/host.mjs` and dropped a call site in the entry; every
+ * test still passed, because nothing imported `index.js` — the suite only
+ * exercised `lib/`. Meanwhile the Host could not activate the plugin at all
+ * (`fiberPhase: "failed"`).
  *
  * `index.js` used to be untestable because it imports `@deepseek-ai/schemastery`,
  * which only resolves inside a packaged Host. `lib/schema.mjs` honours
  * `DSH_SCHEMASTER_ROOT`, so this file builds a throwaway root in the OS temp
  * directory and loads the entry for real. `node --test` runs each file in its own
  * process, so mutating `process.env` here cannot leak into the other suites.
+ *
+ * The entry no longer rewrites requests: it reacts to two events and calls the
+ * Host's own `selectModel`. So these tests assert *when* a switch is attempted
+ * and *what* payload it carries, never what a request resolves to.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -76,6 +80,8 @@ process.env.DSH_SCHEMASTER_ROOT = fakeSchemaRoot()
 const entry = await import(pathToFileURL(join(here, '..', 'index.js')).href)
 
 const EFFORTS = ['max', 'high']
+const PLAN_ROUTE = { provider: 'cline-pass', model: 'm1', reasoningEffort: 'max' }
+const ACT_ROUTE = { provider: 'cline-pass', model: 'm1', reasoningEffort: 'high' }
 
 /** A stub `llm` service with one servable provider/model pair. */
 function stubLlm(models = [{ id: 'm1' }]) {
@@ -86,45 +92,7 @@ function stubLlm(models = [{ id: 'm1' }]) {
   }
 }
 
-/**
- * Drive one `apply()` against a fake Host.
- *
- * @param overrides - tweaks for the scenario under test.
- * @returns the fake Host, the recorded listener table, and collected warnings.
- */
-function harness(overrides = {}) {
-  const listeners = []
-  const warnings = []
-  const roots = overrides.roots ?? [newAgent('root-1')]
-  const events = {}
-
-  const ctx = {
-    get: (name) => overrides.services?.[name],
-    on: (name, fn) => {
-      events[name] = fn
-      return () => {}
-    },
-    inject: () => {},
-    effect: (fn) => {
-      events.teardown = fn()
-    },
-    logger: { warn: (message) => warnings.push(message) },
-    agents: { roots: () => overrides.rootList ?? roots },
-    fiber: {},
-  }
-
-  const config = {
-    enabled: { get: () => overrides.enabled ?? true },
-    plan: { get: () => overrides.plan ?? { provider: 'cline-pass', model: 'm1', reasoningEffort: 'max' } },
-    act: { get: () => overrides.act ?? { provider: 'cline-pass', model: 'm1', reasoningEffort: 'high' } },
-    projects: { get: () => overrides.projects ?? {} },
-  }
-
-  entry.apply(ctx, config)
-  return { listeners, warnings, events, ctx, roots }
-}
-
-function newAgent(id, { cwd = 'C:/work', origin, requestHeader } = {}) {
+function newAgent(id, { cwd = 'C:/work', origin } = {}) {
   const listeners = []
   return {
     id,
@@ -138,11 +106,81 @@ function newAgent(id, { cwd = 'C:/work', origin, requestHeader } = {}) {
       },
     },
     session: {
+      id,
       header: origin === undefined ? { cwd } : { cwd, origin },
-      requestHeader: requestHeader ?? (() => undefined),
     },
     listeners,
   }
+}
+
+/**
+ * Drive one `apply()` against a fake Host.
+ *
+ * @param overrides - tweaks for the scenario under test.
+ * @returns the fake Host, the root listener table, and everything recorded.
+ */
+function harness(overrides = {}) {
+  const warnings = []
+  const calls = []
+  const roots = overrides.roots ?? [newAgent('root-1')]
+  const events = {}
+  const agents = new Map((overrides.rootList ?? roots).map((agent) => [agent.id, agent]))
+
+  function selectModelService() {
+    return {
+      selectModel: async (request) => {
+        calls.push(request)
+        return { selected: request }
+      },
+    }
+  }
+
+  const services = {
+    llm: stubLlm(),
+    ...overrides.services,
+  }
+  // `modelSelection` is what the switcher reads to skip no-op switches. The
+  // projection state is `{ lastUsed, pending }`, not a bare route.
+  if (services.sessionProjections === undefined) {
+    const committed = overrides.selection ?? null
+    services.sessionProjections = {
+      stateOf: (_session, key) =>
+        key === 'modelSelection' && committed !== null
+          ? { pending: committed, lastUsed: null }
+          : undefined,
+    }
+  }
+  if (!('sessionController' in overrides)) services.sessionController = selectModelService()
+  else if (overrides.sessionController !== null) services.sessionController = overrides.sessionController
+
+  const ctx = {
+    get: (name) => services[name],
+    on: (name, fn) => {
+      events[name] = fn
+      return () => {}
+    },
+    inject: () => {},
+    effect: (fn) => {
+      events.teardown = fn()
+    },
+    logger: { warn: (message) => warnings.push(message) },
+    agents: {
+      roots: () => overrides.rootList ?? roots,
+      get: (id) => agents.get(id),
+    },
+    fiber: {},
+  }
+
+  const config = {
+    enabled: { get: () => overrides.enabled ?? true },
+    plan: { get: () => overrides.plan ?? PLAN_ROUTE },
+    act: { get: () => overrides.act ?? ACT_ROUTE },
+    projects: { get: () => overrides.projects ?? {} },
+  }
+
+  // `select` is async; every assertion below drains the microtask queue first.
+  entry.apply(ctx, config)
+  return { warnings, calls, events, ctx, roots, agents, services }
 }
 
 /** Resolve the one listener registered on an Agent for `name`. */
@@ -152,32 +190,43 @@ function handlerFor(agent, name) {
   return found[0].fn
 }
 
-const LISTENERS = ['agent/request', 'system-prompt/assemble', 'agent/pre-step']
-
-/** The services `apply` reads lazily; the mode reader needs one of the two. */
-function services({ planActive = false, llm = stubLlm() } = {}) {
-  return {
-    llm,
-    sessionProjections: { stateOf: (_session, key) => (key === 'plan' ? { active: planActive } : undefined) },
-    agentPresets: { serviceFor: () => undefined },
+/** Let the switcher's promise chain settle. */
+async function settle(times = 4) {
+  // The switcher awaits the catalog sweep, which itself awaits `listModels` and
+  // `resolveModelInfo` per model, so plain microtask ticks are not enough.
+  for (let index = 0; index < times; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0))
   }
 }
 
-test('apply activates and registers all three listeners on a pre-existing Agent', () => {
-  // Regression guard for the released breakage: `attach` referenced `rootOf` and
-  // `resumed` without defining them, so this threw `ReferenceError` and the Host
-  // could not publish any Agent — the composer stayed disabled until the plugin
-  // was turned off.
-  const { roots } = harness({ services: services() })
+/** A `tools/result` payload for `exit_plan_mode` returning `value`. */
+function approvalEvent(agent, value, { name = 'exit_plan_mode', isError = false } = {}) {
+  handlerFor(agent, 'tools/result')({ name, agent }, { isError, value })
+}
+
+/** The `plan/mode` event a session commits when plan mode flips. */
+function planMode(session, active) {
+  return { type: 'plan/mode', data: { active } }
+}
+
+test('apply attaches exactly one tools/result listener per Agent', () => {
+  // Regression guard for the released breakage: `attach` referenced a helper it
+  // did not define, so this threw and the Host could not publish any Agent.
+  const { roots } = harness()
   assert.deepEqual(
     roots[0].listeners.map((item) => item.name),
-    LISTENERS,
+    ['tools/result'],
   )
 })
 
 test('apply survives with no pre-existing Agents', () => {
-  const { roots } = harness({ services: services(), roots: [], rootList: [] })
+  const { roots } = harness({ roots: [], rootList: [] })
   assert.equal(roots.length, 0)
+})
+
+test('apply registers one root-plane session/event listener', () => {
+  const { events } = harness()
+  assert.equal(typeof events['session/event'], 'function')
 })
 
 test('a load failure while attaching is reported once and never escapes', () => {
@@ -190,24 +239,24 @@ test('a load failure while attaching is reported once and never escapes', () => 
   }
   const healthy = newAgent('healthy')
 
-  const { warnings, roots } = harness({ services: services(), roots: [], rootList: [broken, healthy] })
+  const { warnings, agents } = harness({ roots: [], rootList: [broken, healthy] })
 
   assert.equal(
-    warnings.filter((message) => message.includes('无法为该会话挂载路由')).length,
+    warnings.filter((message) => message.includes('无法为该会话挂载切换器')).length,
     1,
     'exactly one attachment failure must be reported',
   )
   assert.deepEqual(
     healthy.listeners.map((item) => item.name),
-    LISTENERS,
+    ['tools/result'],
     'a healthy Agent must still be attached after a broken one',
   )
-  assert.equal(roots.length, 0)
+  assert.deepEqual([...agents.keys()].sort(), ['broken', 'healthy'])
 })
 
 test('a throwing dispose during teardown does not escape', () => {
   const agent = newAgent('a1')
-  const { events } = harness({ services: services(), roots: [agent] })
+  const { events } = harness({ roots: [agent] })
   agent.ctx.on = () => {
     throw new Error('dispose failed')
   }
@@ -215,11 +264,12 @@ test('a throwing dispose during teardown does not escape', () => {
 })
 
 test('agent/created attaches and agent/disposed detaches', () => {
-  const { events } = harness({ services: services(), roots: [], rootList: [] })
+  const { events, agents } = harness({ roots: [], rootList: [] })
   const agent = newAgent('late')
+  agents.set('late', agent)
 
   events['agent/created']({ agent })
-  assert.deepEqual(agent.listeners.map((item) => item.name), LISTENERS)
+  assert.deepEqual(agent.listeners.map((item) => item.name), ['tools/result'])
 
   events['agent/disposed']({ agent })
   assert.deepEqual(agent.listeners, [], 'disposal must unsubscribe every listener')
@@ -227,126 +277,183 @@ test('agent/created attaches and agent/disposed detaches', () => {
 
 test('subagent Agents are never attached', () => {
   const subagent = newAgent('sub', { origin: 'subagent' })
-  const { events } = harness({ services: services(), roots: [], rootList: [] })
+  const { events } = harness({ roots: [], rootList: [] })
 
   events['agent/created']({ agent: subagent })
   assert.deepEqual(subagent.listeners, [])
 })
 
-test('a resumed session passes its first request through untouched', () => {
-  // Covers the restored `resumed` helper: an Agent that already has a request
-  // header must not be re-routed until a real Plan/Act change happens.
-  const agent = newAgent('resumed', { requestHeader: () => ({ config: { provider: 'other', model: 'x' } }) })
-  const { events } = harness({ services: services({ planActive: false }), roots: [], rootList: [] })
+// --- the soft rule: entering plan selects Plan -----------------------------
 
-  events['agent/created']({ agent })
-  const original = { provider: 'other', model: 'x', reasoningEffort: 'low' }
-  const request = handlerFor(agent, 'agent/request')
+test('entering plan mode selects the Plan route', async () => {
+  const agent = newAgent('root-1')
+  const { events, calls } = harness({ roots: [agent] })
 
-  return request({}, async () => original).then((result) => {
-    assert.deepEqual(result, original)
-  })
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
+
+  assert.deepEqual(calls, [{ sessionId: 'root-1', ...PLAN_ROUTE }])
 })
 
-test('a project set to off is left untouched', () => {
-  // Covers the restored `rootOf` helper: the override table is keyed by the
-  // Agent's normalized workspace root.
-  const agent = newAgent('scoped', { cwd: 'C:/work' })
-  const { events } = harness({
-    services: services({ planActive: true }),
-    roots: [],
-    rootList: [],
+test('leaving plan mode never touches the selection', async () => {
+  const agent = newAgent('root-1')
+  const { events, calls } = harness({ roots: [agent] })
+
+  events['session/event'](agent.session, planMode(agent.session, false))
+  await settle()
+
+  assert.deepEqual(calls, [], '/plan off must leave the model alone')
+})
+
+test('a plan/mode event for an unknown session is ignored', async () => {
+  const { events, calls } = harness({ roots: [newAgent('known')] })
+
+  events['session/event']({ id: 'ghost', header: { cwd: 'C:/work' } }, planMode({}, true))
+  await settle()
+
+  assert.deepEqual(calls, [])
+})
+
+test('entering plan is skipped when the session already committed the Plan route', async () => {
+  const agent = newAgent('root-1')
+  const { events, calls } = harness({ roots: [agent], selection: PLAN_ROUTE })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
+
+  assert.deepEqual(calls, [], 're-selecting the current route must not append an event')
+})
+
+test('entering plan keeps a hand-picked effort the configured route leaves open', async () => {
+  const agent = newAgent('root-1')
+  const picked = { provider: 'cline-pass', model: 'm1', reasoningEffort: 'low' }
+  const { events, calls } = harness({
+    roots: [agent],
+    selection: picked,
+    plan: { provider: 'cline-pass', model: 'm1' },
+  })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
+
+  assert.deepEqual(calls, [])
+})
+
+// --- the hard rule: an approved plan selects Act ---------------------------
+
+test('an approved plan forces the Act route', async () => {
+  const agent = newAgent('root-1')
+  const { calls } = harness({ roots: [agent], selection: PLAN_ROUTE })
+
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.deepEqual(calls, [{ sessionId: 'root-1', ...ACT_ROUTE }])
+})
+
+test('an approved plan overrides a hand-picked model in plan mode', async () => {
+  const agent = newAgent('root-1')
+  const picked = { provider: 'other', model: 'x', reasoningEffort: 'low' }
+  const { calls } = harness({ roots: [agent], selection: picked })
+
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.deepEqual(calls, [{ sessionId: 'root-1', ...ACT_ROUTE }])
+})
+
+test('a rejected or kept plan does not switch', async () => {
+  const agent = newAgent('root-1')
+  const { calls } = harness({ roots: [agent] })
+
+  approvalEvent(agent, { approved: false })
+  approvalEvent(agent, {})
+  approvalEvent(agent, undefined)
+  await settle()
+
+  assert.deepEqual(calls, [])
+})
+
+test('a failed exit_plan_mode result does not switch', async () => {
+  const agent = newAgent('root-1')
+  const { calls } = harness({ roots: [agent] })
+
+  approvalEvent(agent, { approved: true }, { isError: true })
+  await settle()
+
+  assert.deepEqual(calls, [])
+})
+
+test('other tools never switch, even when they return an approval field', async () => {
+  const agent = newAgent('root-1')
+  const { calls } = harness({ roots: [agent] })
+
+  approvalEvent(agent, { approved: true }, { name: 'some_other_tool' })
+  await settle()
+
+  assert.deepEqual(calls, [])
+})
+
+test('an approved plan that already committed the Act route is a no-op', async () => {
+  const agent = newAgent('root-1')
+  const { calls } = harness({ roots: [agent], selection: ACT_ROUTE })
+
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.deepEqual(calls, [])
+})
+
+// --- shared stand-aside conditions ----------------------------------------
+
+test('a disabled plugin leaves both automatic rules alone', async () => {
+  const agent = newAgent('root-1')
+  const { events, calls } = harness({ roots: [agent], enabled: false })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.deepEqual(calls, [])
+})
+
+test('a project set to off leaves both automatic rules alone', async () => {
+  const agent = newAgent('root-1', { cwd: 'C:/work' })
+  const { events, calls } = harness({
+    roots: [agent],
     projects: { 'c:/work': { mode: 'off', plan: {}, act: {} } },
   })
 
-  events['agent/created']({ agent })
-  const original = { provider: 'cline-pass', model: 'm1', reasoningEffort: 'high' }
+  events['session/event'](agent.session, planMode(agent.session, true))
+  approvalEvent(agent, { approved: true })
+  await settle()
 
-  return handlerFor(agent, 'agent/request')({}, async () => original).then((result) => {
-    assert.deepEqual(result, original)
-  })
+  assert.deepEqual(calls, [])
 })
 
-test('Plan mode routes to the Plan effort and Act mode to the Act effort', async () => {
-  const planAgent = newAgent('plan')
-  const plan = harness({ services: services({ planActive: true }), roots: [], rootList: [] })
-  plan.events['agent/created']({ agent: planAgent })
-  const routed = await handlerFor(planAgent, 'agent/request')(
-    {},
-    async () => ({ provider: 'p', model: 'm', maxTokens: 1000 }),
-  )
-  assert.deepEqual(routed, {
-    provider: 'cline-pass',
-    model: 'm1',
-    maxTokens: 1000,
-    reasoningEffort: 'max',
+test('an incomplete route is reported once and never reaches selectModel', async () => {
+  const agent = newAgent('root-1')
+  const { events, calls, warnings } = harness({
+    roots: [agent],
+    act: { provider: 'cline-pass', model: '' },
   })
 
-  const actAgent = newAgent('act')
-  const act = harness({ services: services({ planActive: false }), roots: [], rootList: [] })
-  act.events['agent/created']({ agent: actAgent })
-  const actRouted = await handlerFor(actAgent, 'agent/request')(
-    {},
-    async () => ({ provider: 'cline-pass', model: 'm1', maxTokens: 1000, reasoningEffort: 'max' }),
-  )
-  assert.equal(actRouted.reasoningEffort, 'high')
+  approvalEvent(agent, { approved: true })
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.deepEqual(calls, [])
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /不切换|route|provider/)
 })
 
-test('the policy helper routes on the committed mode only after the switch', async () => {
-  // The state machine itself is covered by routing.test.mjs; this asserts the
-  // entry wires a live state per Agent instead of re-deciding from scratch.
-  let planActive = false
-  const live = services({ planActive: false })
-  live.sessionProjections = { stateOf: (_session, key) => (key === 'plan' ? { active: planActive } : undefined) }
+test('a missing sessionController degrades without breaking the event', async () => {
+  const agent = newAgent('root-1')
+  const { events, warnings } = harness({ roots: [agent], sessionController: null })
 
-  const agent = newAgent('switching')
-  const { events } = harness({ services: live, roots: [], rootList: [] })
-  events['agent/created']({ agent })
-  const request = handlerFor(agent, 'agent/request')
-  const seed = async () => ({ provider: 'cline-pass', model: 'm1' })
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
 
-  assert.equal((await request({}, seed)).reasoningEffort, 'high')
-
-  planActive = true
-  assert.equal((await request({}, seed)).reasoningEffort, 'max')
-
-  planActive = false
-  assert.equal((await request({}, seed)).reasoningEffort, 'high')
-})
-
-test('assembly variables follow the previewed route', async () => {
-  const agent = newAgent('asm')
-  const { events } = harness({ services: services({ planActive: true }), roots: [], rootList: [] })
-  events['agent/created']({ agent })
-
-  const assembled = await handlerFor(agent, 'system-prompt/assemble')(
-    {},
-    {},
-    async () => ({ variables: { provider: 'stale', model: 'stale' } }),
-  )
-  assert.deepEqual(assembled.variables, { provider: 'cline-pass', model: 'm1' })
-})
-
-test('the Host "[model changed]" notice is dropped while routing', async () => {
-  const agent = newAgent('notice')
-  const { events } = harness({ services: services({ planActive: true }), roots: [], rootList: [] })
-  events['agent/created']({ agent })
-
-  const kept = await handlerFor(agent, 'agent/pre-step')(
-    {},
-    async () => ({
-      kind: 'enter',
-      messages: [{ source: { kind: 'model-selection' } }, { body: 'real input' }],
-    }),
-  )
-  assert.deepEqual(kept.messages, [{ body: 'real input' }])
-})
-
-test('a disabled plugin still attaches but never rewrites the request', async () => {
-  const agent = newAgent('off')
-  const { events } = harness({ services: services({ planActive: true }), enabled: false, roots: [], rootList: [] })
-  events['agent/created']({ agent })
-
-  const original = { provider: 'p', model: 'm' }
-  assert.deepEqual(await handlerFor(agent, 'agent/request')({}, async () => original), original)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /sessionController/)
 })
