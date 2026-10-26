@@ -1,18 +1,19 @@
 # <type>(<scope>): <summary>
 
-# Keep the subject at or under 72 characters and drop the trailing period.
-# It states the change; the blank line above starts the body, which states why.
-# Wrap the body at 100 characters and keep it to 12 lines or fewer.
-# If the change is obvious from one line, delete everything below this one.
+# The subject is ONE line, 20 characters or fewer, no trailing period.
+#   feat: 新增标签            <- 14 characters of summary left
+#   feat(view): 加标签        <- 8 left; scopes are expensive at this budget
+# A blank line starts the body, which says WHY, in at most 2 lines of 20.
+# If the subject already says it, delete everything below this one.
 #
 # types:  feat fix docs test refactor perf build ci chore revert style
-# scopes: routing host client view schema profile test docs
+# scopes: view routing host client schema profile test docs
 #
-# Leave one blank line before any trailer that git understands
+# Leave one blank line before any trailer git understands
 # (Closes #12, Refs: …, Co-authored-by: …).
 #
 # Attribution lines ("Generated with …", "🤖", AI co-author addresses) are
 # rejected: the message describes the change, not the tool that typed it.
 #
-# Every line above starting with "#" is dropped by git. Set this file as the
-# default with:  git config commit.template .gitmessage
+# Lines starting with "#" are dropped by git. Set this file as the default:
+#   git config commit.template .gitmessage

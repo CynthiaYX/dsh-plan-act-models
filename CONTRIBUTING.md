@@ -14,11 +14,18 @@
 <为什么，不是做了什么>
 ```
 
-1. **标题**写成 `type(scope): summary`，72 字符以内，句尾不加句号。
-2. 标题和正文之间**空一行**；正文每行 100 字符以内，12 行以内。
+1. **标题**写成 `type(scope): summary`，**整行 20 字符以内**，句尾不加句号。
+2. 标题和正文之间**空一行**；正文每行 **20 字符**以内，**2 行**以内。
 3. 正文只解释**为什么**。改了哪些文件、加了什么函数，`git show` 里都有。
 
-能从一行看懂的改动就别写正文——一个 `fix(client): ...` 是合格的完整提交。
+能从标题看懂的改动就别写正文——一个 `fix(client): 修正` 是合格的完整提交。
+
+> **20 字符是整行预算**，`type`、scope、冒号、空格都算在内。所以 scope 越短越好，
+> 极端情况下干脆不写 scope：`feat: 新增标签` 比 `feat(view): 新增标签` 多出 6 个字符。
+>
+> 参考余量：`feat: ` 占 6 字符，摘要可用 14；`feat(view): ` 占 12，摘要只剩 8；
+> `refactor(routing): ` 占 19，摘要只剩 1 字符——长 type 配长 scope 基本不可用，
+> 这种情况请改用 `refactor: ` 或省略 scope。
 
 ### type
 
@@ -47,14 +54,14 @@
 ### 例子
 
 ```
-feat(view): show the resolved route beside the model selector
+feat(view): 加路由标签
 ```
 
 ```
-fix(routing): read the committed plan state on the first request after a switch
+fix(route): 复用修正
 
-The transition only flips once, so the request that follows it still saw the
-previous route and the Act model was used one turn late.
+State 只翻一次。
+首请求读旧路由。
 ```
 
 ### 会被拒绝的写法
@@ -62,7 +69,7 @@ previous route and the Act model was used one turn late.
 - 没有 `type:` 前缀的标题。
 - 标题以 `.` 或 `。` 结尾。
 - 正文紧贴标题（缺空行）。
-- 标题超过 72 字符、正文行超过 100 字符。
+- 标题超过 20 字符、正文行超过 20 字符。
 - 任何形式的署名行：`Generated with …`、`🤖`、AI 协作者邮箱。
   提交解释改动本身，不解释谁敲的字。
 

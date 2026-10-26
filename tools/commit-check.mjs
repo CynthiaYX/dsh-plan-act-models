@@ -31,14 +31,22 @@ export const TYPES = [
   'style',
 ]
 
-/** Longest accepted subject, in characters (not bytes: subjects may be Chinese). */
-export const SUBJECT_MAX = 72
+/**
+ * Longest accepted subject, in characters (not bytes: subjects may be Chinese).
+ *
+ * This budget covers the whole `type(scope): summary` line, so a scope costs its
+ * own characters. At this width `feat(view): ` is already 12 of the 20 and the
+ * summary gets the rest; `refactor(routing): ` does not fit at all, which is the
+ * intended trade: shorten the scope rather than the subject.
+ */
+export const SUBJECT_MAX = 20
 
-/** Longest accepted body line. Wider than the subject because URLs and code. */
-export const BODY_MAX = 100
+/** Longest accepted body line. Same budget as the subject, so the body reads
+ *  as a stack of short facts rather than prose. */
+export const BODY_MAX = 20
 
 /** Bodies longer than this are flagged as too long to read. */
-export const BODY_LINES_SOFT = 12
+export const BODY_LINES_SOFT = 2
 
 /**
  * Messages git or the user generated rather than wrote: rewriting these would
