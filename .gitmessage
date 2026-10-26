@@ -1,0 +1,18 @@
+# <type>(<scope>): <summary>
+
+# Keep the subject at or under 72 characters and drop the trailing period.
+# It states the change; the blank line above starts the body, which states why.
+# Wrap the body at 100 characters and keep it to 12 lines or fewer.
+# If the change is obvious from one line, delete everything below this one.
+#
+# types:  feat fix docs test refactor perf build ci chore revert style
+# scopes: routing host client view schema profile test docs
+#
+# Leave one blank line before any trailer that git understands
+# (Closes #12, Refs: …, Co-authored-by: …).
+#
+# Attribution lines ("Generated with …", "🤖", AI co-author addresses) are
+# rejected: the message describes the change, not the tool that typed it.
+#
+# Every line above starting with "#" is dropped by git. Set this file as the
+# default with:  git config commit.template .gitmessage

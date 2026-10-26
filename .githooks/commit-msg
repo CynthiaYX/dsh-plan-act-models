@@ -1,0 +1,16 @@
+#!/bin/sh
+# Reject a commit message that does not follow CONTRIBUTING.md.
+#
+# Git calls this with the path of the message file. Enable it once per clone:
+#   git config core.hooksPath .githooks
+#
+# The check is a plain Node script with no dependencies, so this works in the
+# same environment that runs `npm test`. A machine without Node is warned and
+# let through rather than blocked: the hook is a convenience, not a gate.
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "commit-msg: node not found on PATH, skipping the message check" >&2
+  exit 0
+fi
+
+exec node "$(git rev-parse --show-toplevel)/tools/commit-check.mjs" "$1"
