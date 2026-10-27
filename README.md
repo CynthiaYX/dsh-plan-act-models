@@ -20,27 +20,27 @@
 
 ## 安装
 
-分发包是 `dsh-plan-act-models-0.4.0.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
+分发包是 `dsh-plan-act-models-0.5.0.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
 完整步骤、验证清单与排错见 **[INSTALL.md](./INSTALL.md)**，安装路线摘录：
 
 - **桌面版**：应用内 **设置 → 插件 → 从本地文件安装** 选 tarball，然后重启应用。
   桌面 profile 由应用独占管理，外部 `dsh --profile desktop …` 会报
   `managed exclusively by the Electron application`。
-- **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.4.0.tgz"`，
+- **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.5.0.tgz"`，
   Launcher 会自动把 bundle 写进 `dsh.profile.bundles`，然后重启。
 - **直接从本仓库装**（不需要本地有 tarball）：装最新 Release 附件，或按 git 引用装源码——
 
   ```powershell
   dsh plugin --profile <profile> add "https://github.com/CynthiaYX/dsh-plan-act-models/releases/latest/download/dsh-plan-act-models.tgz"
   # 或锁定到某个 tag 的源码
-  dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.4.0"
+  dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.5.0"
   ```
 
   两者都指向同一套文件；Release 附件是 `npm pack` 产物，`github:` 走整仓 tarball，
   仓库根就是包根，没有需要裁剪的子目录。
 
-  > 当前最新 Release：**v0.4.0**（附件 `dsh-plan-act-models.tgz` 与
-  > `dsh-plan-act-models-0.4.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
+  > 当前最新 Release：**v0.5.0**（附件 `dsh-plan-act-models.tgz` 与
+  > `dsh-plan-act-models-0.5.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
   > 把 `latest` 换成新 tag 可以锁定版本。
 
 配置入口：**设置 → 模式与模型**（首次默认关闭自动切换）。

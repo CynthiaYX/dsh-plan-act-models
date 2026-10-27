@@ -4,7 +4,7 @@
 （Plan、Act，以及你自己命名的任意个自定义模式），并可选地按模式自动切换模型。
 它不改宿主代码、不存 API Key。
 
-安装包：`dsh-plan-act-models-0.4.0.tgz`（`npm pack` 产物）。别人给你的就是这个 tarball；
+安装包：`dsh-plan-act-models-0.5.0.tgz`（`npm pack` 产物）。别人给你的就是这个 tarball；
 也可以直接从 GitHub Release 取（本仓库每次打 `v*` tag 都会挂上同名的 tgz 与稳定名
 `dsh-plan-act-models.tgz`），命令里把路径或 URL 换成你手里的那份即可。
 
@@ -22,7 +22,7 @@
 `profile "desktop" is managed exclusively by the Electron application`），因此必须用应用内的插件界面：
 
 1. 打开 **设置 → 插件**，进入插件管理 / 本地安装入口
-2. 选择 **从本地文件安装**，指向 `dsh-plan-act-models-0.4.0.tgz` 的绝对路径
+2. 选择 **从本地文件安装**，指向 `dsh-plan-act-models-0.5.0.tgz` 的绝对路径
 3. 等安装完成后 **重启应用**（新装的 bundle 需要重启才会被加载）
 4. 打开 **设置 → 模式与模型**，确认页面能正常显示（不是「宿主没有提供配置项」）
 
@@ -32,10 +32,10 @@
 
 ```powershell
 # 本地 tarball
-dsh plugin --profile <profile> add "C:\路径\dsh-plan-act-models-0.4.0.tgz"
+dsh plugin --profile <profile> add "C:\路径\dsh-plan-act-models-0.5.0.tgz"
 # 或：直接装最新 Release 附件 / 锁到某个 tag 的源码
 dsh plugin --profile <profile> add "https://github.com/CynthiaYX/dsh-plan-act-models/releases/latest/download/dsh-plan-act-models.tgz"
-dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.4.0"
+dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.5.0"
 ```
 
 - 安装成功后 Launcher 会把新 bundle 自动写进该 profile `package.json` 的 `dsh.profile.bundles`，
