@@ -2,18 +2,19 @@ window.__ModuleLoader__.load({
   id: 'dsh-plan-act-models',
   factory(require) {
     const React = require('react')
-    const { useCallback, useEffect, useMemo, useState } = React
+    const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     const ENTRY = 'plan-act-models'
     const FALLBACK = 'rgba(127, 127, 127, 0.45)'
-    const muted = 'var(--dsw-alias-text-secondary, #8b8b8b)'
-    const danger = 'var(--dsw-alias-text-danger, #d14343)'
-    const accent = 'var(--dsw-alias-state-business-primary, #247bbf)'
-    const border = `1px solid var(--dsw-alias-border, ${FALLBACK})`
-    const radius = 'var(--dsw-alias-border-radius, 6px)'
+    // Host tokens only: `--dsw-alias-text-secondary` and friends do not exist,
+    // so the settings page used to paint itself with these grey fallbacks.
+    const muted = 'var(--dsw-alias-label-secondary, #8b8b8b)'
+    const danger = 'var(--dsw-alias-state-error-primary, #d14343)'
+    const border = `1px solid var(--dsw-alias-border-l2, ${FALLBACK})`
+    const radius = '10px'
 
     const control = {
-      background: 'var(--dsw-alias-bg-secondary, transparent)',
+      background: 'var(--dsw-alias-bg-layer-1, transparent)',
       color: 'inherit',
       border,
       borderRadius: radius,
@@ -648,13 +649,142 @@ window.__ModuleLoader__.load({
 
     const CHIP_ID = 'plan-act-route'
     const CHIP_ORDER = 100
+    const CHIP_STYLE_ID = 'dsh-plan-act-models/chip.css'
 
-    // The composer's own tokens, so the control sits in the toolbar like the
-    // native selector beside it: same height, same type scale, and it disappears
-    // in the compact layout the selector collapses into (`data-model-compact`).
-    const chipStrong = 'var(--dsw-alias-label-primary, currentColor)'
-    const chipDim = 'var(--dsw-alias-label-dimmed, currentColor)'
-    const chipError = 'var(--dsw-alias-label-danger, #d14343)'
+    /**
+     * The chip's own stylesheet.
+     *
+     * Injected from the factory (not from this file's top level) because a
+     * classic script's top-level side effects run at *arrival*, while the client
+     * module system only tolerates effects at *materialization* — it claims the
+     * `<style>` tags a factory added (`claimStyles`) for HMR bookkeeping.
+     *
+     * Every declaration rides a `--dsw-*` host token and keeps a literal
+     * fallback, so a Host that ever renames a token degrades to a plain chip
+     * instead of an invisible one. The mode word carries the colour (Plan blue,
+     * Act green) and the model name stays in the quieter text tone, which is
+     * what makes the two entries readable at a glance.
+     */
+    const CHIP_CSS = `
+.pam-chip{position:relative;display:inline-flex;align-items:center;gap:4px;flex:none;min-width:0;max-width:min(240px,42cqw);white-space:nowrap;color:var(--dsw-alias-label-primary,currentColor)}
+.pam-trigger{box-sizing:border-box;display:inline-flex;align-items:center;gap:0;height:28px;min-width:0;max-width:100%;margin:0;padding:0 8px 0 10px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,0.45));border-radius:999px;background:var(--dsw-specific-selector,var(--dsw-alias-bg-layer-1,transparent));color:inherit;font:inherit;font-size:13px;font-weight:500;line-height:20px;text-align:left;cursor:pointer;outline:none}
+.pam-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid,var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,0.12)))}
+.pam-trigger:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3,rgba(127,127,127,0.5))}
+.pam-trigger:disabled{opacity:.45;cursor:default}
+.pam-trigger[data-open="true"]{border-color:var(--dsw-alias-border-l4,var(--dsw-alias-border-l3,rgba(127,127,127,0.5)))}
+.pam-trigger[data-tone="custom"]{border-style:dashed;color:var(--dsw-alias-label-secondary,currentColor)}
+.pam-dot{flex:none;width:6px;height:6px;margin-right:5px;border-radius:50%;background:currentColor}
+.pam-mode{flex:none;font-weight:600}
+.pam-model{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,currentColor)}
+.pam-chevron{flex:none;margin-left:4px;color:var(--dsw-alias-label-caption,currentColor);transition:transform .12s ease}
+.pam-trigger[data-open="true"] .pam-chevron{transform:rotate(180deg)}
+.pam-trigger[data-tone="plan"] .pam-mode,.pam-option[data-tone="plan"] .pam-mode{color:var(--dsw-alias-state-business-primary,#247bbf)}
+.pam-trigger[data-tone="plan"] .pam-dot{background:var(--dsw-alias-state-business-primary,#247bbf)}
+.pam-trigger[data-tone="act"] .pam-mode,.pam-option[data-tone="act"] .pam-mode{color:var(--dsw-alias-state-success-primary,#22a05b)}
+.pam-trigger[data-tone="act"] .pam-dot{background:var(--dsw-alias-state-success-primary,#22a05b)}
+.pam-trigger[data-tone="custom"] .pam-mode,.pam-option[data-tone="custom"] .pam-mode{color:var(--dsw-alias-label-tertiary,currentColor)}
+.pam-trigger[data-tone="custom"] .pam-dot{opacity:.5}
+.pam-menu{position:absolute;right:0;bottom:calc(100% + 8px);z-index:20;display:flex;flex-direction:column;gap:2px;width:min(280px,calc(100vw - 32px));max-height:min(320px,60vh);overflow-y:auto;padding:4px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,0.45));border-radius:12px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-3,#1b1b1c));box-shadow:0 12px 32px rgba(0,0,0,.24),0 2px 8px rgba(0,0,0,.12);color:var(--dsw-alias-label-primary,currentColor)}
+.pam-option{display:flex;align-items:center;gap:0;width:100%;min-height:34px;margin:0;padding:6px 8px;border:none;border-radius:9px;background:transparent;color:inherit;font:inherit;font-size:13px;line-height:18px;text-align:left;white-space:nowrap;cursor:pointer}
+.pam-option:hover:not(:disabled),.pam-option[data-active="true"]:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,0.12))}
+.pam-option:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-alias-border-l3,rgba(127,127,127,0.5))}
+.pam-option:disabled{cursor:default}
+.pam-option:disabled:not([data-tone="custom"]){opacity:.45}
+.pam-check{flex:none;display:grid;place-items:center;width:14px;height:14px;margin-right:6px;color:var(--dsw-alias-label-secondary,currentColor)}
+.pam-option[data-tone="plan"] .pam-check{color:var(--dsw-alias-state-business-primary,#247bbf)}
+.pam-option[data-tone="act"] .pam-check{color:var(--dsw-alias-state-success-primary,#22a05b)}
+.pam-check--hidden{visibility:hidden}
+.pam-failure{font-size:11px;color:var(--dsw-alias-state-error-primary,#d14343);max-width:220px;overflow:hidden;text-overflow:ellipsis}
+@container (width<=460px){.pam-model{max-width:110px}}
+`
+
+    let chipStylesInstalled = false
+
+    /**
+     * Add the chip stylesheet once per page.
+     *
+     * Idempotent across HMR re-materialization: the tag carries
+     * `data-plugin-css`, which is both the client module system's bookkeeping
+     * key and the query this function uses to detect an earlier install.
+     * A missing `document` (tests, SSR) is simply a no-op.
+     */
+    function ensureChipStyles() {
+      if (chipStylesInstalled) return
+      if (typeof document === 'undefined') return
+      const head = document.head
+      if (head === undefined || head === null || typeof head.appendChild !== 'function') return
+      const selector = `style[data-plugin-css=${JSON.stringify(CHIP_STYLE_ID)}]`
+      if (typeof document.querySelector === 'function' && document.querySelector(selector) !== null) {
+        chipStylesInstalled = true
+        return
+      }
+      if (typeof document.createElement !== 'function') return
+      const tag = document.createElement('style')
+      if (tag.dataset !== undefined && tag.dataset !== null) {
+        tag.dataset.plugin = 'dsh-plan-act-models'
+        tag.dataset.pluginCss = CHIP_STYLE_ID
+      }
+      tag.textContent = CHIP_CSS
+      head.appendChild(tag)
+      chipStylesInstalled = true
+    }
+
+    /**
+     * Split `模式：模型` into the coloured mode word and the rest.
+     *
+     * The two halves are separate spans so the mode word can carry the accent
+     * colour while the model name stays quiet and ellipsizes; back-to-back they
+     * still spell the exact label the Host-side tests assert.
+     * @param props.text - a `routeLabel`/`customLabel` result.
+     */
+    function LabelParts(props) {
+      const text = props.text
+      const at = text.indexOf(LABEL_SEPARATOR)
+      const mode = at < 0 ? text : text.slice(0, at)
+      const rest = at < 0 ? '' : text.slice(at)
+      return React.createElement(
+        React.Fragment,
+        null,
+        React.createElement('span', { key: 'mode', className: 'pam-mode' }, mode),
+        rest === '' ? null : React.createElement('span', { key: 'model', className: 'pam-model' }, rest),
+      )
+    }
+
+    /** The 12px chevron the native selector uses, so the two read as one row. */
+    function ChipChevron() {
+      return React.createElement(
+        'svg',
+        {
+          className: 'pam-chevron',
+          width: 12,
+          height: 12,
+          viewBox: '0 0 12 12',
+          fill: 'none',
+          'aria-hidden': 'true',
+        },
+        React.createElement('path', {
+          d: 'M3 4.5L6 7.5L9 4.5',
+          stroke: 'currentColor',
+          strokeWidth: 1.5,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+    }
+
+    function ChipCheck() {
+      return React.createElement(
+        'svg',
+        { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+        React.createElement('path', {
+          d: 'M3.5 8.5L6.5 11.5L12.5 4.5',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+    }
 
     /**
      * The mode dropdown beside the native model selector.
@@ -667,6 +797,12 @@ window.__ModuleLoader__.load({
      * from plan mode, which is what makes the control honest: after a hand-pick
      * that matches neither configured route it shows `自定义：<model>` instead of
      * claiming a track the session is not on.
+     *
+     * The control is a button plus a hand-rolled listbox rather than a native
+     * `<select>`: the platform popup cannot be themed, which is what made the
+     * earlier version look like a stray OS widget inside the composer. It stays
+     * dependency-free — `react` only — so keep keyboard handling complete
+     * (open, move, commit, dismiss) whenever this is touched.
      */
     function RouteSelect(props) {
       const { form, loadCatalog, select, canSelect } = props
@@ -674,6 +810,11 @@ window.__ModuleLoader__.load({
       const [catalog, setCatalog] = useState(null)
       const [busy, setBusy] = useState(false)
       const [failure, setFailure] = useState(null)
+      const [open, setOpen] = useState(false)
+      // Index into `options` (not a track name): the placeholder is a row too, and
+      // the keyboard has to be able to walk past it without selecting it.
+      const [active, setActive] = useState(null)
+      const rootRef = useRef(null)
 
       const plan = typeof props.useProjection === 'function' ? props.useProjection('plan') : undefined
       const selection =
@@ -691,6 +832,23 @@ window.__ModuleLoader__.load({
         if (!form?.subscribe) return undefined
         return form.subscribe(() => setSnapshot(form.getSnapshot()))
       }, [form])
+
+      // A menu that stays open while the pointer is somewhere else is a trap:
+      // close on any pointer press outside the chip, like the native selector.
+      useEffect(() => {
+        if (!open) return undefined
+        if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') {
+          return undefined
+        }
+        const away = (event) => {
+          const root = rootRef.current
+          if (root !== null && typeof root.contains === 'function' && root.contains(event?.target)) return
+          setOpen(false)
+          setActive(null)
+        }
+        document.addEventListener('pointerdown', away)
+        return () => document.removeEventListener('pointerdown', away)
+      }, [open])
 
       useEffect(() => {
         let cancelled = false
@@ -759,89 +917,198 @@ window.__ModuleLoader__.load({
       }
 
       const options = [track === null ? 'custom' : null, 'plan', 'act'].filter((item) => item !== null)
+      const selected = track === null ? 'custom' : track
+      // A row that cannot be picked still renders and still explains itself; the
+      // menu never silently drops an entry the user configured.
+      const pickable = (name) => name !== 'custom' && offerable(name) && busy === false
+      const firstPickable = options.find(pickable)
+      const far = (offset) => (offset < 0 ? options.length - 1 : 0)
+
+      function closeMenu() {
+        setOpen(false)
+        setActive(null)
+      }
+
+      function openMenu(offset) {
+        // Opening stays possible even when nothing can be committed: the menu is
+        // the only place that explains *why* every entry is inert.
+        if (busy) return
+        // Land the keyboard cursor on the current entry when that entry is a
+        // real choice; a placeholder or a disabled track starts at an edge.
+        const fromCurrent = options.indexOf(selected)
+        const start =
+          fromCurrent >= 0 && pickable(selected)
+            ? fromCurrent
+            : firstPickable === undefined
+              ? far(offset)
+              : options.indexOf(firstPickable)
+        setActive(start)
+        setOpen(true)
+      }
+
+      function stepActive(delta) {
+        if (options.length === 0) return
+        const from = active === null ? (delta < 0 ? 0 : -1) : active
+        for (let hop = 1; hop <= options.length; hop += 1) {
+          const next = (((from + delta * hop) % options.length) + options.length) % options.length
+          if (pickable(options[next])) {
+            setActive(next)
+            return
+          }
+        }
+      }
+
+      function commit(name) {
+        closeMenu()
+        choose(name)
+      }
+
+      function onTriggerKeyDown(event) {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault()
+          if (open) stepActive(event.key === 'ArrowDown' ? 1 : -1)
+          else openMenu(event.key === 'ArrowDown' ? 1 : -1)
+          return
+        }
+        if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+          event.preventDefault()
+          if (open) {
+            const name = active === null ? undefined : options[active]
+            if (name !== undefined && pickable(name)) commit(name)
+            else closeMenu()
+          } else {
+            openMenu(1)
+          }
+          return
+        }
+        if (event.key === 'Escape' && open) {
+          event.preventDefault()
+          closeMenu()
+        }
+      }
+
+      function onMenuKeyDown(event) {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault()
+          stepActive(event.key === 'ArrowDown' ? 1 : -1)
+          return
+        }
+        if (event.key === 'Home' || event.key === 'End') {
+          event.preventDefault()
+          const order = event.key === 'Home' ? options.map((_, index) => index) : options.map((_, index) => options.length - 1 - index)
+          const hit = order.find((index) => pickable(options[index]))
+          if (hit !== undefined) setActive(hit)
+          return
+        }
+        if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+          event.preventDefault()
+          const name = active === null ? undefined : options[active]
+          if (name !== undefined) commit(name)
+          return
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          closeMenu()
+          if (typeof document !== 'undefined') {
+            const button = rootRef.current?.querySelector?.('.pam-trigger')
+            button?.focus?.()
+          }
+          return
+        }
+        if (event.key === 'Tab') closeMenu()
+      }
+
+      const menuId = `pam-menu-${props.sessionId ?? 'session'}`
 
       return React.createElement(
         'span',
         {
-          style: {
-            // Same compact-layout escape hatch the native selector uses: the row
-            // sets this to `none` when it collapses, hiding our control with it.
-            display: 'var(--dsh-composer-model-text-display, inline-flex)',
-            alignItems: 'center',
-            gap: 4,
-            flex: 'none',
-            height: 28,
-            minWidth: 0,
-            maxWidth: 'min(360px, 45cqw)',
-            color: chipStrong,
-            whiteSpace: 'nowrap',
-          },
+          ref: rootRef,
+          className: 'pam-chip',
+          style: { display: 'inline-flex' },
           title: failure === null ? title : `${title}\n${failure}`,
         },
         React.createElement(
-          'select',
+          'button',
           {
+            type: 'button',
+            className: 'pam-trigger',
+            'data-tone': selected,
+            'data-open': open ? 'true' : 'false',
             'aria-label': label,
-            style: {
-              // A native `<select>` (not a custom popup): it is keyboard operable,
-              // matches the settings page, and needs no dependency. `appearance`
-              // strips the platform chrome so it reads as composer text.
-              appearance: 'none',
-              WebkitAppearance: 'none',
-              background: 'transparent',
-              border: 'none',
-              padding: '0 2px',
-              margin: 0,
-              font: 'inherit',
-              fontSize: 13,
-              fontWeight: 500,
-              lineHeight: '20px',
-              textAlign: 'left',
-              maxWidth: '100%',
-              minWidth: 0,
-              cursor: canSelect === true ? 'pointer' : 'default',
-              color: busy ? chipDim : track === null ? chipDim : track === 'plan' ? accent : chipStrong,
-            },
-            value: track === null ? 'custom' : track,
+            'aria-haspopup': 'listbox',
+            'aria-expanded': open ? 'true' : 'false',
+            'aria-controls': open ? menuId : undefined,
+            'aria-disabled': canSelect === true ? undefined : 'true',
             disabled: busy,
-            onChange: (event) => {
-              choose(event.target.value)
+            onClick: () => {
+              if (open) closeMenu()
+              else openMenu(1)
             },
+            onKeyDown: onTriggerKeyDown,
           },
-          options.map((name) => {
-            if (name === 'custom') {
-              return React.createElement(
-                'option',
-                { key: 'custom', value: 'custom', disabled: true, title: customTitle(committed) },
-                label,
-              )
-            }
-            const target = targets[name]
-            return React.createElement(
-              'option',
-              {
-                key: name,
-                value: name,
-                disabled: !offerable(name),
-                title: routeTitle(name, target, catalog),
-              },
-              routeLabel(name, target, catalog),
-            )
-          }),
+          React.createElement('span', { key: 'dot', className: 'pam-dot', 'aria-hidden': 'true' }),
+          React.createElement(LabelParts, { key: 'label', text: label }),
+          React.createElement(ChipChevron, { key: 'chevron' }),
         ),
+        open
+          ? React.createElement(
+              'div',
+              {
+                className: 'pam-menu',
+                id: menuId,
+                role: 'listbox',
+                'aria-label': 'Plan / Act 模型',
+                tabIndex: -1,
+                onKeyDown: onMenuKeyDown,
+                style: { opacity: 1 },
+              },
+              options.map((name, index) => {
+                const pick = name === 'custom' ? customLabel(committed, catalog) : routeLabel(name, targets[name], catalog)
+                const hint = name === 'custom' ? customTitle(committed) : routeTitle(name, targets[name], catalog)
+                const isPickable = name !== 'custom' && offerable(name)
+                return React.createElement(
+                  'button',
+                  {
+                    key: name,
+                    type: 'button',
+                    className: 'pam-option',
+                    role: 'option',
+                    'data-tone': name,
+                    'data-active': active === index ? 'true' : 'false',
+                    'aria-selected': name === selected ? 'true' : 'false',
+                    'aria-disabled': isPickable ? undefined : 'true',
+                    tabIndex: -1,
+                    title: hint,
+                    disabled: name === 'custom' || busy || !offerable(name),
+                    onClick: () => {
+                      if (name === 'custom') return
+                      commit(name)
+                    },
+                  },
+                  React.createElement(
+                    'span',
+                    { key: 'check', className: name === selected ? 'pam-check' : 'pam-check pam-check--hidden' },
+                    React.createElement(ChipCheck),
+                  ),
+                  React.createElement(LabelParts, { key: 'label', text: pick }),
+                )
+              }),
+            )
+          : null,
         failure === null
           ? null
-          : React.createElement(
-              'span',
-              { style: { fontSize: 11, color: chipError, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' } },
-              failure,
-            ),
+          : React.createElement('span', { className: 'pam-failure' }, failure),
       )
     }
 
     return {
       inject: ['slots', 'configForms', 'remote', 'remote.session'],
       apply(ctx) {
+        // Factory-time, not module-time: the client module system claims the
+        // stylesheets added while a factory runs, and treats top-level effects
+        // as arriving too early.
+        ensureChipStyles()
         const form = ctx.configForms.get(ENTRY)
 
         // One shared catalog read for the dropdown. Started lazily on first

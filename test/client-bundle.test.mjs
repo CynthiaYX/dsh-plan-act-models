@@ -9,16 +9,18 @@
  *
  * This file fakes the module loader plus the Services `apply()` touches
  * (`configForms`, `slots`, `remote`) and asserts what the real code asks for. It
- * pins three invariants: the namespace handed to `configForms.get()` must equal
+ * pins four invariants: the namespace handed to `configForms.get()` must equal
  * the `id` in `cordis.patch.yml` (`dsh-settings` keys `describe()` by the Loader
- * row id); the composer control must be a real `<select>` whose entries read
- * `模式：模型`; and a pick must go through the Host's own `session.selectModel`,
- * not through an event of our own.
+ * row id); the composer control is a themed chip — a `button` plus a hand-rolled
+ * `listbox`, never a native `<select>`, whose entries still read `模式：模型`; a
+ * pick must go through the Host's own `session.selectModel`, not through an
+ * event of our own; and the stylesheet is added exactly once, from the factory.
  *
- * The React stand-in is a minimal hooks renderer (state, effects, a re-render
- * loop) rather than an inert stub, because half of what the control does —
- * loading the catalog, showing a failure — only becomes visible on a second
- * pass. An inert stub would silently pass those tests with `null`.
+ * The React stand-in is a minimal hooks renderer (state, effects, refs, a
+ * re-render loop) rather than an inert stub, because half of what the control
+ * does — loading the catalog, opening the menu, showing a failure — only becomes
+ * visible on a second pass. An inert stub would silently pass those tests with
+ * `null`.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -41,6 +43,7 @@ let hooks = null
 function fakeReact() {
   return {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    Fragment: Symbol.for('pam.fragment'),
     useCallback: (fn) => fn,
     useEffect: (fn) => {
       if (hooks === null) return undefined
@@ -49,6 +52,13 @@ function fakeReact() {
       return cleanup
     },
     useMemo: (fn) => fn(),
+    useRef: (initial) => {
+      const store = hooks
+      const index = store.next
+      store.next += 1
+      if (!(index in store.refs)) store.refs[index] = { current: initial }
+      return store.refs[index]
+    },
     useState: (initial) => {
       // Captured per call, the way React's dispatcher binds a setter to the
       // running store: a setter invoked after the render would otherwise read a
@@ -70,6 +80,53 @@ function fakeReact() {
   }
 }
 
+/**
+ * A `document` that records what the bundle does to it.
+ *
+ * The chip injects a `<style>` from its factory and closes its menu on an
+ * outside `pointerdown`, so the fake keeps the appended tags (keyed the way the
+ * real `querySelector` finds them) and the listeners, and lets a test fire one.
+ */
+function fakeDocument() {
+  const tags = []
+  const listeners = new Map()
+  const styleSelector = (tag) => styleSelectorFor(tag.dataset.pluginCss)
+  return {
+    tags,
+    head: {
+      appendChild(tag) {
+        tags.push(tag)
+      },
+    },
+    createElement(tagName) {
+      return { type: tagName, dataset: {}, textContent: '' }
+    },
+    querySelector(selector) {
+      return tags.find((tag) => styleSelector(tag) === selector) ?? null
+    },
+    addEventListener(type, listener) {
+      const list = listeners.get(type) ?? []
+      list.push(listener)
+      listeners.set(type, list)
+    },
+    removeEventListener(type, listener) {
+      listeners.set(type, (listeners.get(type) ?? []).filter((item) => item !== listener))
+    },
+    /** Deliver one event to every listener of `type`. */
+    fire(type, event) {
+      for (const listener of [...(listeners.get(type) ?? [])]) listener(event)
+    },
+  }
+}
+
+/** The selector the bundle looks up for one stylesheet id. */
+function styleSelectorFor(id) {
+  return `style[data-plugin-css=${JSON.stringify(id)}]`
+}
+
+/** The document installed by the most recent `loadDeclaration()`. */
+let activeDocument = null
+
 /** Load the bundle and return the declaration it registers. */
 let loads = 0
 async function loadDeclaration() {
@@ -81,7 +138,8 @@ async function loadDeclaration() {
       },
     },
   }
-  globalThis.document = { addEventListener() {}, removeEventListener() {} }
+  activeDocument = fakeDocument()
+  globalThis.document = activeDocument
   // A fresh query string defeats the ESM module cache: the bundle has to run
   // again for each test, because its whole effect is the single `load()` call.
   loads += 1
@@ -103,7 +161,7 @@ function rowId() {
  * @param form - what `configForms.get()` returns.
  * @param catalog - what `modelCatalog()` resolves to; `undefined` omits the method.
  * @param selectModel - what `session.selectModel()` replies; `undefined` omits the method.
- * @returns the registered specs (with their component), the seats, the namespaces asked for, and the calls made.
+ * @returns the registered specs (with their component), the seats, the namespaces asked for, the calls made, and the faked pieces.
  */
 async function mount(form, catalog, selectModel) {
   const declaration = await loadDeclaration()
@@ -148,7 +206,7 @@ async function mount(form, catalog, selectModel) {
   }
 
   module.apply(ctx)
-  return { declaration, asked, registered, seats, selected }
+  return { declaration, module, asked, registered, seats, selected, styles: activeDocument.tags }
 }
 
 /** A configForms snapshot the control accepts as settled. */
@@ -159,11 +217,12 @@ function readyForm(value) {
   }
 }
 
-/** Flatten the text a `createElement` tree renders. */
+/** Flatten the text a `createElement` tree renders, expanding function components. */
 function textOf(node) {
   if (node === null || node === undefined || node === false) return ''
   if (typeof node === 'string' || typeof node === 'number') return String(node)
   if (Array.isArray(node)) return node.map(textOf).join('')
+  if (typeof node.type === 'function') return textOf(node.type({ ...node.props, children: node.children }))
   return (node.children ?? []).map(textOf).join('')
 }
 
@@ -174,24 +233,49 @@ function chipOf(registered) {
   return found
 }
 
-/** The `<select>` inside a rendered control. */
-function selectOf(element) {
+/** The chip frame: `<span class="pam-chip">`. */
+function chipOfElement(element) {
   assert.ok(element, 'the control must render an element')
-  const select = (element.children ?? []).find((child) => child?.type === 'select')
-  assert.ok(select, 'the control must render a native <select>')
-  return select
+  assert.equal(element.type, 'span')
+  assert.equal(element.props.className, 'pam-chip')
+  return element
 }
 
-/** The `<option>` entries of a rendered control, keyed by value. */
+/** The trigger button of a rendered chip. */
+function triggerOf(element) {
+  const trigger = (chipOfElement(element).children ?? []).find(
+    (child) => child?.type === 'button' && child.props.className === 'pam-trigger',
+  )
+  assert.ok(trigger, 'the control must render a <button class="pam-trigger">')
+  return trigger
+}
+
+/** The open menu of a rendered chip, or `null` when it is closed. */
+function menuOf(element) {
+  return (
+    (chipOfElement(element).children ?? []).find(
+      (child) => child?.type === 'div' && child.props.className === 'pam-menu',
+    ) ?? null
+  )
+}
+
+/** The `role="option"` rows of an open menu, keyed by tone (`plan`, `act`, `custom`). */
 function optionsOf(element) {
-  const byValue = {}
-  // `createElement('select', props, options.map(…))` passes one array child, so
-  // the flat list has to be unwrapped before it can be keyed.
-  for (const child of selectOf(element).children.flat(Infinity)) {
-    if (child?.type !== 'option') continue
-    byValue[child.props.value] = child
+  const menu = menuOf(element)
+  assert.ok(menu, 'the menu must be open before its options can be read')
+  const byTone = {}
+  // `createElement('div', props, options.map(…))` passes one array child, so the
+  // flat list has to be unwrapped before it can be keyed.
+  for (const child of menu.children.flat(Infinity)) {
+    if (child?.type !== 'button' || child.props.role !== 'option') continue
+    byTone[child.props['data-tone']] = child
   }
-  return byValue
+  return byTone
+}
+
+/** Simulate a key press the way React would deliver one. */
+function key(name) {
+  return { key: name, preventDefault() {} }
 }
 
 /**
@@ -208,7 +292,7 @@ function optionsOf(element) {
 async function renderChip(registered, props) {
   const { spec, component } = chipOf(registered)
   const injected = spec.inject()
-  const store = { states: [], next: 0, dirty: true, cleanups: [] }
+  const store = { states: [], refs: [], next: 0, dirty: true, cleanups: [] }
   let element = null
 
   async function pass() {
@@ -247,6 +331,14 @@ async function renderChip(registered, props) {
     injected,
     rerender: pass,
   }
+}
+
+/** Click the trigger and settle the re-render, leaving the menu open. */
+async function openChip(rendered) {
+  triggerOf(rendered.element).props.onClick()
+  await rendered.rerender()
+  assert.ok(menuOf(rendered.element), 'clicking the trigger must open the menu')
+  return rendered
 }
 
 const MODEL = 'deepseek-v4.1-flash-1017'
@@ -299,6 +391,30 @@ test('the control registers beside the native model selector', async () => {
   assert.equal(typeof injected.select, 'function', 'the control needs a way to commit a route')
 })
 
+test('the stylesheet is injected from the factory, once, and names the chip classes', async () => {
+  const { module, styles } = await mount(readyForm(ROUTE_PAIR))
+  assert.equal(styles.length, 1, 'the factory must add exactly one <style>')
+  const tag = styles[0]
+  assert.equal(tag.type, 'style')
+  assert.equal(tag.dataset.plugin, 'dsh-plan-act-models')
+  assert.equal(tag.dataset.pluginCss, 'dsh-plan-act-models/chip.css')
+  for (const klass of ['.pam-chip', '.pam-trigger', '.pam-menu', '.pam-option']) {
+    assert.ok(tag.textContent.includes(klass), `${klass} must be styled`)
+  }
+  assert.match(tag.textContent, /--dsw-alias-state-business-primary/, 'Plan keeps the blue accent')
+  assert.match(tag.textContent, /--dsw-alias-state-success-primary/, 'Act keeps the green accent')
+
+  // A second apply() on the same module (an HMR re-materialization) must find
+  // the existing tag instead of stacking a duplicate copy of the rules.
+  const ctx = {
+    configForms: { get: () => readyForm(ROUTE_PAIR) },
+    slots: { inject: (seat, callback) => callback(), register: () => () => {} },
+    remote: { session: {} },
+  }
+  module.apply(ctx)
+  assert.equal(styles.length, 1, 'the stylesheet must not be injected twice')
+})
+
 test('the committed selection decides which entry is shown', async () => {
   const { registered } = await mount(readyForm(ROUTE_PAIR))
 
@@ -308,7 +424,7 @@ test('the committed selection decides which entry is shown', async () => {
     plan: { active: true },
     selection: ON_PLAN,
   })
-  assert.equal(selectOf(plan.element).props.value, 'plan')
+  assert.equal(triggerOf(plan.element).props['data-tone'], 'plan')
 
   const act = await renderChip(registered, {
     sessionId: 's1',
@@ -316,7 +432,7 @@ test('the committed selection decides which entry is shown', async () => {
     plan: { active: false },
     selection: ON_ACT,
   })
-  assert.equal(selectOf(act.element).props.value, 'act')
+  assert.equal(triggerOf(act.element).props['data-tone'], 'act')
 })
 
 test('the control does not follow plan mode, only the committed selection', async () => {
@@ -330,101 +446,171 @@ test('the control does not follow plan mode, only the committed selection', asyn
     plan: { active: true },
     selection: ON_ACT,
   })
-  assert.equal(selectOf(rendered.element).props.value, 'act')
+  assert.equal(triggerOf(rendered.element).props['data-tone'], 'act')
+})
+
+test('the menu stays closed until the trigger is pressed', async () => {
+  const { registered } = await mount(readyForm(ROUTE_PAIR))
+  const rendered = await renderChip(registered, {
+    sessionId: 's1',
+    row: { cwd: 'C:/work' },
+    plan: { active: true },
+    selection: ON_PLAN,
+  })
+  assert.equal(menuOf(rendered.element), null, 'no popup is rendered up front')
+  assert.equal(triggerOf(rendered.element).props['aria-expanded'], 'false')
+  assert.equal(triggerOf(rendered.element).props['aria-haspopup'], 'listbox')
+  assert.equal(triggerOf(rendered.element).type, 'button')
+  assert.equal(triggerOf(rendered.element).props.disabled, false)
+})
+
+test('opening shows a listbox whose current entry is the selected one', async () => {
+  const { registered } = await mount(readyForm(ROUTE_PAIR))
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  const menu = menuOf(rendered.element)
+  assert.equal(menu.props.role, 'listbox')
+  assert.equal(triggerOf(rendered.element).props['aria-expanded'], 'true')
+  assert.equal(triggerOf(rendered.element).props['aria-controls'], menu.props.id)
+  const options = optionsOf(rendered.element)
+  assert.equal(options.plan.props['aria-selected'], 'true')
+  assert.equal(options.act.props['aria-selected'], 'false')
 })
 
 test('the entries read `模式：模型` with a full-width colon', async () => {
   const { registered } = await mount(readyForm(ROUTE_PAIR))
-  const plan = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_PLAN,
-  })
+  const plan = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
   const options = optionsOf(plan.element)
   assert.equal(textOf(options.plan), `Plan：${MODEL}`)
   assert.equal(textOf(options.act), `Act：${MODEL}`)
   assert.equal(options.custom, undefined, 'the placeholder only appears when neither entry matches')
+  assert.equal(textOf(triggerOf(plan.element)), `Plan：${MODEL}`)
 })
 
 test('the entries use the catalog display name when one exists', async () => {
   const { registered } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => ({ ok: true, value: {} }))
-  const plan = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_PLAN,
-  })
+  const plan = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
   assert.equal(textOf(optionsOf(plan.element).plan), 'Plan：DeepSeek V4.1 Flash')
 })
 
 test('a selection matching neither entry shows a disabled placeholder naming it', async () => {
   const { registered } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => ({ ok: true, value: {} }))
-  const rendered = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: NOWHERE,
-  })
-  assert.equal(selectOf(rendered.element).props.value, 'custom')
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: NOWHERE,
+    }),
+  )
+  assert.equal(triggerOf(rendered.element).props['data-tone'], 'custom')
   const custom = optionsOf(rendered.element).custom
   assert.ok(custom, 'a placeholder entry must exist')
   assert.equal(custom.props.disabled, true, 'the placeholder is not a third choice')
+  assert.equal(custom.props['aria-selected'], 'true')
   assert.equal(textOf(custom), '自定义：stray')
   assert.match(rendered.element.props.title, /^自定义 — other\/stray \(low\)$/)
 })
 
 test('picking an entry commits it through session.selectModel', async () => {
   const { registered, selected } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => ({ ok: true, value: {} }))
-  const plan = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_PLAN,
-  })
-  await selectOf(plan.element).props.onChange({ target: { value: 'act' } })
+  const plan = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  optionsOf(plan.element).act.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
 
   assert.deepEqual(selected, [
     { sessionId: 's1', provider: 'cline-pass', model: MODEL, reasoningEffort: 'high' },
   ])
 })
 
+test('picking an entry closes the menu', async () => {
+  const { registered } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => ({ ok: true, value: {} }))
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  optionsOf(rendered.element).act.props.onClick()
+  await rendered.rerender()
+  assert.equal(menuOf(rendered.element), null, 'committing dismisses the menu')
+  assert.equal(triggerOf(rendered.element).props['aria-expanded'], 'false')
+})
+
 test('picking the entry already shown does nothing', async () => {
   const { registered, selected } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => ({ ok: true, value: {} }))
-  const plan = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_PLAN,
-  })
-  await selectOf(plan.element).props.onChange({ target: { value: 'plan' } })
+  const plan = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  optionsOf(plan.element).plan.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
   assert.deepEqual(selected, [], 'an unchanged pick must not append a model/selection event')
 })
 
 test('a route with no effort omits the field instead of sending an empty string', async () => {
   const value = { ...ROUTE_PAIR, act: { provider: 'cline-pass', model: MODEL } }
   const { registered, selected } = await mount(readyForm(value), CATALOG, () => ({ ok: true, value: {} }))
-  const plan = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_PLAN,
-  })
-  await selectOf(plan.element).props.onChange({ target: { value: 'act' } })
+  const plan = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  optionsOf(plan.element).act.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
   assert.deepEqual(selected, [{ sessionId: 's1', provider: 'cline-pass', model: MODEL }])
 })
 
 test('an incomplete entry is shown but not selectable', async () => {
   const value = { ...ROUTE_PAIR, plan: { provider: 'cline-pass', model: '' } }
   const { registered } = await mount(readyForm(value), CATALOG, () => ({ ok: true, value: {} }))
-  const rendered = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_ACT,
-  })
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_ACT,
+    }),
+  )
   const options = optionsOf(rendered.element)
   assert.equal(options.plan.props.disabled, true)
+  assert.equal(options.plan.props['aria-disabled'], 'true')
   assert.equal(textOf(options.plan), 'Plan：未配置')
   assert.equal(options.act.props.disabled, false)
 })
@@ -432,12 +618,14 @@ test('an incomplete entry is shown but not selectable', async () => {
 test('a project set to off disables both entries and says so', async () => {
   const value = { ...ROUTE_PAIR, projects: { 'c:/work': { mode: 'off' } } }
   const { registered } = await mount(readyForm(value), CATALOG, () => ({ ok: true, value: {} }))
-  const rendered = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_ACT,
-  })
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_ACT,
+    }),
+  )
   const options = optionsOf(rendered.element)
   assert.equal(options.plan.props.disabled, true)
   assert.equal(options.act.props.disabled, true)
@@ -446,15 +634,18 @@ test('a project set to off disables both entries and says so', async () => {
 
 test('without selectModel in the Host the entries say why they are inert', async () => {
   const { registered } = await mount(readyForm(ROUTE_PAIR), CATALOG)
-  const rendered = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_PLAN,
-  })
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
   const options = optionsOf(rendered.element)
   assert.equal(options.plan.props.disabled, true)
   assert.equal(options.act.props.disabled, true)
+  assert.equal(triggerOf(rendered.element).props['aria-disabled'], 'true')
   assert.match(rendered.element.props.title, /· 宿主不支持切换模型$/)
 })
 
@@ -485,12 +676,14 @@ test('a project override is reflected in the label and the title', async () => {
     },
   }
   const { registered } = await mount(readyForm(value), CATALOG, () => ({ ok: true, value: {} }))
-  const rendered = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/Work' },
-    plan: { active: true },
-    selection: { next: { provider: 'other', model: 'pinned-model' }, lastUsed: null },
-  })
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/Work' },
+      plan: { active: true },
+      selection: { next: { provider: 'other', model: 'pinned-model' }, lastUsed: null },
+    }),
+  )
   assert.equal(textOf(optionsOf(rendered.element).plan), 'Plan：pinned-model')
   assert.match(rendered.element.props.title, /· 项目覆盖：c:\/work$/)
 })
@@ -551,13 +744,15 @@ test('the control hides on a subagent session and while settings are unsettled',
 test('turning automatic switching off does not disable the dropdown', async () => {
   const value = { ...ROUTE_PAIR, enabled: false }
   const { registered } = await mount(readyForm(value), CATALOG, () => ({ ok: true, value: {} }))
-  const rendered = await renderChip(registered, {
-    sessionId: 's1',
-    row: { cwd: 'C:/work' },
-    plan: { active: true },
-    selection: ON_PLAN,
-  })
-  assert.equal(selectOf(rendered.element).props.disabled, false, 'a manual pick always works')
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  assert.equal(triggerOf(rendered.element).props.disabled, false, 'a manual pick always works')
   assert.equal(optionsOf(rendered.element).act.props.disabled, false)
   assert.match(rendered.element.props.title, /· 自动切换已关闭$/)
   assert.doesNotMatch(rendered.text, /已关闭/)
@@ -566,14 +761,97 @@ test('turning automatic switching off does not disable the dropdown', async () =
 test('a rejected pick is shown beside the control', async () => {
   const reply = { ok: false, error: { code: 'session/model-unavailable', message: '模型不可用' } }
   const { registered } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => reply)
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  optionsOf(rendered.element).act.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await rendered.rerender()
+  assert.match(rendered.text, /session\/model-unavailable: 模型不可用/)
+  assert.match(rendered.element.props.title, /session\/model-unavailable: 模型不可用$/)
+  const failure = (chipOfElement(rendered.element).children ?? []).find(
+    (child) => child?.props?.className === 'pam-failure',
+  )
+  assert.ok(failure, 'the failure keeps its own element so it can be styled and truncated')
+})
+
+test('Escape closes the menu without touching the selection', async () => {
+  const { registered, selected } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => ({ ok: true, value: {} }))
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  menuOf(rendered.element).props.onKeyDown(key('Escape'))
+  await rendered.rerender()
+  assert.equal(menuOf(rendered.element), null)
+  assert.deepEqual(selected, [])
+})
+
+test('the keyboard can open, walk the entries and commit with Enter', async () => {
+  const { registered, selected } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => ({ ok: true, value: {} }))
   const rendered = await renderChip(registered, {
     sessionId: 's1',
     row: { cwd: 'C:/work' },
     plan: { active: true },
     selection: ON_PLAN,
   })
-  await selectOf(rendered.element).props.onChange({ target: { value: 'act' } })
+  // ArrowDown on the closed trigger opens the menu on the current entry.
+  triggerOf(rendered.element).props.onKeyDown(key('ArrowDown'))
   await rendered.rerender()
-  assert.match(rendered.text, /session\/model-unavailable: 模型不可用/)
-  assert.match(rendered.element.props.title, /session\/model-unavailable: 模型不可用$/)
+  assert.ok(menuOf(rendered.element), 'ArrowDown must open the menu')
+  // One more ArrowDown lands on the next selectable row…
+  menuOf(rendered.element).props.onKeyDown(key('ArrowDown'))
+  await rendered.rerender()
+  const active = optionsOf(rendered.element).act
+  assert.equal(active.props['data-active'], 'true')
+  // …and Enter commits it.
+  menuOf(rendered.element).props.onKeyDown(key('Enter'))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(selected, [
+    { sessionId: 's1', provider: 'cline-pass', model: MODEL, reasoningEffort: 'high' },
+  ])
+})
+
+test('a pointer press outside the chip closes the menu', async () => {
+  const { registered } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => ({ ok: true, value: {} }))
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  globalThis.document.fire('pointerdown', { target: {} })
+  await rendered.rerender()
+  assert.equal(menuOf(rendered.element), null, 'an outside press dismisses the menu')
+  assert.equal(globalThis.document.tags.length, 1, 'the dismissal must not re-inject styles')
+})
+
+test('a pending pick disables the trigger so a double commit cannot race', async () => {
+  const { registered } = await mount(readyForm(ROUTE_PAIR), CATALOG, () => new Promise(() => {}))
+  const rendered = await openChip(
+    await renderChip(registered, {
+      sessionId: 's1',
+      row: { cwd: 'C:/work' },
+      plan: { active: true },
+      selection: ON_PLAN,
+    }),
+  )
+  optionsOf(rendered.element).act.props.onClick()
+  await rendered.rerender()
+  assert.equal(triggerOf(rendered.element).props.disabled, true)
+  // Reopening is refused while the commit is in flight.
+  triggerOf(rendered.element).props.onClick()
+  await rendered.rerender()
+  assert.equal(menuOf(rendered.element), null)
 })
