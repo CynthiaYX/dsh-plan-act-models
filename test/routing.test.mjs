@@ -8,9 +8,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  BUILTIN_TRACKS,
   MODE_ACT,
   MODE_PLAN,
+  customName,
+  customTracks,
   formatRoute,
+  modesOf,
   normalizeRoute,
   projectKey,
   resolveTarget,
@@ -20,14 +24,21 @@ import {
   sessionTrack,
   switchActOnApproval,
   switchPlan,
+  tracksOf,
   unref,
 } from '../lib/routing.mjs'
 
 const PLAN_ROUTE = { provider: 'cline-pass', model: 'deepseek-v4.1-flash', reasoningEffort: 'max' }
 const ACT_ROUTE = { provider: 'cline-pass', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' }
+const REVIEW_ROUTE = { provider: 'local', model: 'reviewer', reasoningEffort: 'low' }
 
 function config(overrides = {}) {
-  return { enabled: true, plan: PLAN_ROUTE, act: ACT_ROUTE, projects: {}, ...overrides }
+  return { enabled: true, plan: PLAN_ROUTE, act: ACT_ROUTE, modes: {}, projects: {}, ...overrides }
+}
+
+/** A config carrying one complete custom mode, `m1`. */
+function withMode(overrides = {}) {
+  return config({ modes: { m1: { name: '审查', ...REVIEW_ROUTE } }, ...overrides })
 }
 
 /** A plan entry, for the two switch helpers. */
@@ -182,6 +193,126 @@ test('sessionTrack resolves through a project override', () => {
   const cfg = config({ projects })
   assert.equal(sessionTrack({ provider: 'local', model: 'planner' }, cfg, '/w', MODE_ACT), MODE_PLAN)
   assert.equal(sessionTrack(PLAN_ROUTE, cfg, '/w', MODE_ACT), null)
+})
+
+// --- custom modes ----------------------------------------------------------
+
+test('modesOf survives every shape the config cell arrives in', () => {
+  assert.deepEqual(modesOf(config()), {})
+  assert.deepEqual(modesOf({}), {})
+  assert.deepEqual(modesOf(null), {})
+  assert.deepEqual(modesOf({ modes: [] }), {})
+  assert.deepEqual(modesOf({ modes: { get: () => ({ m1: { name: 'A' } }) } }), { m1: { name: 'A' } })
+})
+
+test('customName falls back to a positional default, never to an empty label', () => {
+  assert.equal(customName({ name: '审查' }, 0), '审查')
+  assert.equal(customName({ name: '   ' }, 0), '模式 1')
+  assert.equal(customName({}, 2), '模式 3')
+  assert.equal(customName(null, 1), '模式 2')
+  // The Host trims; a name with inner spaces is kept as the user typed it.
+  assert.equal(customName({ name: '代码 审查' }, 0), '代码 审查')
+})
+
+test('customTracks lists modes in stored order and says which are usable', () => {
+  const cfg = config({
+    modes: {
+      m1: { name: '审查', ...REVIEW_ROUTE },
+      m2: { name: '待补', provider: 'local', model: '' },
+    },
+  })
+  assert.deepEqual(customTracks(cfg), [
+    { id: 'm1', name: '审查', complete: true },
+    { id: 'm2', name: '待补', complete: false },
+  ])
+  assert.deepEqual(customTracks(config()), [])
+})
+
+test('tracksOf puts the two built-ins first, then every custom mode', () => {
+  const tracks = tracksOf(withMode())
+  assert.deepEqual(tracks.map((track) => track.id), ['plan', 'act', 'm1'])
+  assert.deepEqual(tracks[0], { id: 'plan', name: 'Plan', builtin: true })
+  assert.deepEqual(tracks[1], { id: 'act', name: 'Act', builtin: true })
+  assert.deepEqual(tracks[2], { id: 'm1', name: '审查', builtin: false })
+  assert.deepEqual(BUILTIN_TRACKS, ['plan', 'act'])
+})
+
+test('resolveTarget reads a custom mode from the global table', () => {
+  const target = resolveTarget(withMode(), '/w', 'm1')
+  assert.equal(target.kind, 'route')
+  assert.equal(target.scope, 'global')
+  assert.equal(target.projectKey, null)
+  assert.deepEqual(target.route, REVIEW_ROUTE)
+})
+
+test('resolveTarget names a broken custom mode instead of inventing a route', () => {
+  const cfg = config({ modes: { m1: { name: '审查', provider: 'local', model: '' } } })
+  const target = resolveTarget(cfg, '/w', 'm1')
+  assert.equal(target.kind, 'invalid')
+  assert.equal(target.scope, 'global')
+  assert.match(target.reason, /自定义模式「审查」缺少 provider 或 model/)
+
+  // An id that is not in the table at all still reports something greppable.
+  assert.match(resolveTarget(config(), '/w', 'ghost').reason, /自定义模式「ghost」/)
+})
+
+test('a project override never reaches a custom mode', () => {
+  // The project table is a pair — it cannot name a custom route — so an
+  // `override` row must leave the custom mode reading the global entry.
+  const projects = { '/w': { mode: 'override', plan: { provider: 'local', model: 'planner' } } }
+  const target = resolveTarget(withMode({ projects }), '/w', 'm1')
+  assert.equal(target.scope, 'global')
+  assert.deepEqual(target.route, REVIEW_ROUTE)
+})
+
+test('a project set to off silences custom modes too', () => {
+  const projects = { '/w': { mode: 'off', plan: PLAN_ROUTE, act: ACT_ROUTE } }
+  const target = resolveTarget(withMode({ projects }), '/w', 'm1')
+  assert.equal(target.kind, 'off')
+  assert.equal(target.scope, 'project')
+})
+
+test('sessionTrack recognises a selection sitting on a custom mode', () => {
+  assert.equal(sessionTrack(REVIEW_ROUTE, withMode(), '/w', MODE_ACT), 'm1')
+  assert.equal(sessionTrack(PLAN_ROUTE, withMode(), '/w', MODE_ACT), MODE_PLAN)
+})
+
+test('a custom mode that matches a built-in loses the tie to the built-in', () => {
+  // The chip must not start calling a Plan selection by the user's own label:
+  // the built-in word is the one the plan/act rule keeps producing. Custom modes
+  // come after the built-ins in `tracksOf`, so the first match is always one.
+  const cfg = config({ modes: { m1: { name: '也是 Plan', ...PLAN_ROUTE } } })
+  assert.equal(sessionTrack(PLAN_ROUTE, cfg, '/w', MODE_PLAN), MODE_PLAN)
+  assert.equal(sessionTrack(PLAN_ROUTE, cfg, '/w', MODE_ACT), MODE_PLAN)
+})
+
+test('a custom mode colliding with another custom mode resolves to the first', () => {
+  const cfg = config({
+    modes: { m1: { name: '甲', ...REVIEW_ROUTE }, m2: { name: '乙', ...REVIEW_ROUTE } },
+  })
+  assert.equal(sessionTrack(REVIEW_ROUTE, cfg, '/w', MODE_ACT), 'm1')
+})
+
+test('the automatic rules override a custom selection', () => {
+  // Decision recorded in the plan: a custom mode is manual-only, so entering plan
+  // mode still pulls the session onto the Plan route, and approving a plan still
+  // forces Act. Both read the same config the chip does.
+  const cfg = withMode()
+  const plan = switchPlan({ enabled: true, config: cfg, path: '/w', current: REVIEW_ROUTE, mode: MODE_ACT })
+  assert.equal(plan.action, 'select')
+  assert.deepEqual(plan.route, PLAN_ROUTE)
+
+  const approval = switchActOnApproval({ enabled: true, config: cfg, path: '/w', current: REVIEW_ROUTE })
+  assert.equal(approval.action, 'select')
+  assert.deepEqual(approval.route, ACT_ROUTE)
+})
+
+test('switchPlan treats a custom selection as off-track, not as on-Plan', () => {
+  // Guards the arrow of the rule: a custom route sharing provider+model with Plan
+  // but pinning a different effort is still off the Plan track.
+  const cfg = withMode({ plan: { provider: 'local', model: 'reviewer' } })
+  const verdict = switchPlan({ enabled: true, config: cfg, path: '/w', current: REVIEW_ROUTE, mode: MODE_PLAN })
+  assert.deepEqual(verdict, { action: 'pass', reason: 'on-track' })
 })
 
 // --- switchPlan ------------------------------------------------------------

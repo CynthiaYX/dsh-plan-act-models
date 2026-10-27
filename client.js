@@ -34,6 +34,29 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * The largest number of custom modes the page will hold.
+     *
+     * A cap rather than unlimited: every entry costs a row in a menu that opens
+     * upward inside the composer, and a user who wants a thirteenth can delete
+     * one. It is a page limit, not a Host limit — the Host renders what it finds.
+     */
+    const MODE_LIMIT = 12
+
+    /** The default name of the `index`-th custom mode; must match `customName`. */
+    function defaultModeName(index) {
+      return `模式 ${index + 1}`
+    }
+
+    function modeOf(value, index) {
+      const entry = value && typeof value === 'object' ? value : {}
+      const name = typeof entry.name === 'string' ? entry.name : ''
+      return {
+        name: name.trim() === '' ? defaultModeName(index) : name,
+        ...routeOf(entry),
+      }
+    }
+
     function draftOf(value) {
       const source = value && typeof value === 'object' ? value : {}
       const projects = {}
@@ -46,10 +69,16 @@ window.__ModuleLoader__.load({
           act: routeOf(entry.act),
         }
       }
+      const modes = {}
+      const rawModes = source.modes && typeof source.modes === 'object' ? source.modes : {}
+      Object.keys(rawModes).forEach((id, index) => {
+        modes[id] = modeOf(rawModes[id], index)
+      })
       return {
         enabled: source.enabled === true,
         plan: routeOf(source.plan),
         act: routeOf(source.act),
+        modes,
         projects,
       }
     }
@@ -74,6 +103,17 @@ window.__ModuleLoader__.load({
       return JSON.stringify(left) === JSON.stringify(right)
     }
 
+    /**
+     * Whether the settings page shows per-project overrides.
+     *
+     * The Host half still resolves `projects` — the field keeps working for
+     * anyone who wrote it by hand, and every test still covers it — but the page
+     * stopped offering it: a mode dropdown that can mean three different routes
+     * depending on the folder was more confusing than useful. Flip this to
+     * `true` to bring the editor back; nothing else needs to change.
+     */
+    const SHOW_PROJECT_OVERRIDES = false
+
     // #region plan-act-view — test/client-view.test.mjs extracts this block verbatim
     //
     // The composer chip has to answer "which route would the next request use"
@@ -83,10 +123,17 @@ window.__ModuleLoader__.load({
     // mirrored here. Every function below is self-contained so the test can
     // evaluate the region with `new Function` and compare it against the real
     // `resolveTarget` over an input matrix — a one-sided edit fails the suite.
+    //
+    // Custom modes are part of that table: `mirrorResolve` resolves one by id,
+    // `mirrorTracks` lists them beside plan/act, and `mirrorTrackOf` reports
+    // which of them the committed selection lands on. Their default name
+    // (`模式 N`) has to match `customName` in `lib/routing.mjs` word for word.
 
     /** Full-width colon: the chip reads `模式：模型`. */
     const LABEL_SEPARATOR = '：'
     const MODE_WORDS = { plan: 'Plan', act: 'Act' }
+    /** The tone a custom-mode entry wears: one accent for all of them. */
+    const CUSTOM_TONE = 'mode'
 
     function mirrorUnref(value) {
       if (value === null || value === undefined) return value
@@ -142,7 +189,36 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    /** Browser twin of `resolveTarget`: `{ kind, route, scope, projectKey }`. */
+    function mirrorModes(config) {
+      const table = mirrorUnref(config?.modes)
+      if (table === null || typeof table !== 'object' || Array.isArray(table)) return {}
+      return table
+    }
+
+    /** Browser twin of `customName`: an empty name falls back to `模式 N`. */
+    function mirrorModeName(entry, index) {
+      const value = mirrorUnref(entry)
+      const name = value !== null && typeof value === 'object' ? mirrorText(value.name) : ''
+      return name === '' ? `模式 ${index + 1}` : name
+    }
+
+    /** Browser twin of `customTracks`: `[{ id, name, complete }]`, stored order. */
+    function mirrorCustomTracks(config) {
+      const table = mirrorModes(config)
+      return Object.keys(table).map((id, index) => ({
+        id,
+        name: mirrorModeName(table[id], index),
+        complete: mirrorRoute(table[id]) !== null,
+      }))
+    }
+
+    /**
+     * Browser twin of `resolveTarget`: `{ kind, route, scope, projectKey, reason }`.
+     *
+     * `mode` is `plan`, `act`, or a custom mode id. A custom mode always resolves
+     * from the global table — the project override is a pair and cannot name one —
+     * while a project set to `off` silences every track, custom included.
+     */
     function mirrorResolve(config, path, mode) {
       const hit = mirrorFindProject(config?.projects, path)
       const entryMode = hit === null ? 'inherit' : mirrorMode(hit.entry)
@@ -151,8 +227,22 @@ window.__ModuleLoader__.load({
 
       if (entryMode === 'off') return { kind: 'off', scope: 'project', projectKey: key }
 
-      const source = entryMode === 'override' ? mirrorUnref(hit.entry)[mode] : mirrorUnref(config?.[mode])
+      const builtin = mode === 'plan' || mode === 'act'
+      const source = builtin
+        ? (entryMode === 'override' ? mirrorUnref(hit.entry)[mode] : mirrorUnref(config?.[mode]))
+        : mirrorUnref(mirrorModes(config)[mode])
       const route = mirrorRoute(source)
+
+      if (!builtin) {
+        if (route === null) {
+          const ids = Object.keys(mirrorModes(config))
+          const index = ids.indexOf(mode)
+          const name = index < 0 ? mode : mirrorModeName(source, index)
+          return { kind: 'invalid', scope: 'global', projectKey: null, reason: `自定义模式「${name}」缺少 provider 或 model` }
+        }
+        return { kind: 'route', route, scope: 'global', projectKey: null }
+      }
+
       if (route === null) return { kind: 'invalid', scope, projectKey: key }
       return { kind: 'route', route, scope, projectKey: key }
     }
@@ -172,20 +262,39 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Browser twin of `tracksOf`: plan, act, then the custom modes.
+     * @returns `[{ id, name, builtin }]` in dropdown order.
+     */
+    function mirrorTracks(config) {
+      const custom = mirrorCustomTracks(config).map((track) => ({
+        id: track.id,
+        name: track.name,
+        builtin: false,
+      }))
+      return [
+        { id: 'plan', name: 'Plan', builtin: true },
+        { id: 'act', name: 'Act', builtin: true },
+        ...custom,
+      ]
+    }
+
+    /**
      * Browser twin of `sessionTrack`: which track the committed selection sits
-     * on, or null when it is neither (`mode` only breaks a tie).
+     * on, or null when it is none of them (`mode` only breaks a tie, and a
+     * built-in wins a tie against a custom mode).
      */
     function mirrorTrackOf(selection, config, path, mode) {
       const current = mirrorRoute(selection)
       if (current === null) return null
-      const plan = mirrorResolve(config, path, 'plan')
-      const act = mirrorResolve(config, path, 'act')
-      const onPlan = plan.kind === 'route' && mirrorSameTrack(current, plan.route)
-      const onAct = act.kind === 'route' && mirrorSameTrack(current, act.route)
-      if (onPlan && onAct) return mode === 'plan' ? 'plan' : 'act'
-      if (onPlan) return 'plan'
-      if (onAct) return 'act'
-      return null
+      const matches = mirrorTracks(config).filter((track) => {
+        const resolved = mirrorResolve(config, path, track.id)
+        return resolved.kind === 'route' && mirrorSameTrack(current, resolved.route)
+      })
+      if (matches.length === 0) return null
+      if (matches.length === 1) return matches[0].id
+      const preferred = mode === 'plan' ? 'plan' : 'act'
+      const named = matches.find((track) => track.id === preferred)
+      return named === undefined ? matches[0].id : named.id
     }
 
     /** Display name of a route's model, falling back to its id. */
@@ -200,12 +309,14 @@ window.__ModuleLoader__.load({
 
     /**
      * The option text: `模式：模型`.
-     * @param track - `plan` | `act`
+     * @param track - `plan` | `act` | a custom mode id
      * @param resolved - {@link mirrorResolve} result for that track
      * @param catalog - model catalog, or null while it is still loading
+     * @param name - display name of the track; a custom mode's name, otherwise
+     *   the built-in word. Optional so the two fixed tracks read as they always did.
      */
-    function routeLabel(track, resolved, catalog) {
-      const word = MODE_WORDS[track] ?? MODE_WORDS.act
+    function routeLabel(track, resolved, catalog, name) {
+      const word = typeof name === 'string' && name !== '' ? name : (MODE_WORDS[track] ?? track)
       if (resolved === null || resolved === undefined) return `${word}${LABEL_SEPARATOR}未配置`
       if (resolved.kind === 'off') return `${word}${LABEL_SEPARATOR}此项目已停用`
       if (resolved.kind !== 'route') return `${word}${LABEL_SEPARATOR}未配置`
@@ -233,8 +344,8 @@ window.__ModuleLoader__.load({
     }
 
     /** Hover text for an option: its label, then where the route comes from. */
-    function routeTitle(track, resolved, catalog) {
-      const label = routeLabel(track, resolved, catalog)
+    function routeTitle(track, resolved, catalog, name) {
+      const label = routeLabel(track, resolved, catalog, name)
       const detail = routeDetail(resolved)
       return detail === null ? label : `${label} — ${detail}`
     }
@@ -386,16 +497,26 @@ window.__ModuleLoader__.load({
 
       const routes = useMemo(() => {
         const found = [routeError(draft.plan, 'Plan 路由'), routeError(draft.act, 'Act 路由')]
+        // A custom mode is offered in the same dropdown, so an incomplete one is
+        // just as visible a dead entry as an unset Act route: block the save and
+        // name the mode, rather than letting the menu show an inert row later.
+        for (const [id, entry] of Object.entries(draft.modes ?? {})) {
+          found.push(routeError(entry, `自定义模式「${entry.name}」的路由`))
+        }
         // A project set to `override` replaces the global pair wholesale, so an
         // incomplete override would block every request in that project. The
         // Host cannot catch this: it validates shape, not cross-field intent.
-        for (const [key, entry] of Object.entries(draft.projects ?? {})) {
-          if (entry?.mode !== 'override') continue
-          found.push(routeError(entry.plan, `项目「${key}」的 Plan 路由`))
-          found.push(routeError(entry.act, `项目「${key}」的 Act 路由`))
+        // Skipped while the editor is hidden: a hand-written override must not
+        // make a page that cannot show it refuse to save.
+        if (SHOW_PROJECT_OVERRIDES) {
+          for (const [key, entry] of Object.entries(draft.projects ?? {})) {
+            if (entry?.mode !== 'override') continue
+            found.push(routeError(entry.plan, `项目「${key}」的 Plan 路由`))
+            found.push(routeError(entry.act, `项目「${key}」的 Act 路由`))
+          }
         }
         return found.filter(Boolean)
-      }, [draft.plan, draft.act, draft.projects])
+      }, [draft.plan, draft.act, draft.modes, draft.projects])
 
       const blocked = draft.enabled && routes.length > 0
 
@@ -411,6 +532,17 @@ window.__ModuleLoader__.load({
           enabled: draft.enabled,
           plan: toPayload(draft.plan),
           act: toPayload(draft.act),
+          modes: Object.fromEntries(
+            Object.entries(draft.modes).map(([id, entry], index) => [
+              id,
+              {
+                // A name the user cleared falls back to the positional default
+                // instead of being stored blank, so the Host never has to guess.
+                name: entry.name.trim() === '' ? defaultModeName(index) : entry.name.trim(),
+                ...toPayload(entry),
+              },
+            ]),
+          ),
           projects: Object.fromEntries(
             Object.entries(draft.projects).map(([key, entry]) => [
               key,
@@ -429,7 +561,7 @@ window.__ModuleLoader__.load({
         setBusy(false)
         setMessage(
           ok
-            ? '已保存。下拉框里的两项立即按新配置显示；自动切换在下一个事件生效。'
+            ? '已保存。下拉框里的各项立即按新配置显示；自动切换在下一个事件生效。'
             : '保存失败（可能是配置已被改动）。已重新载入最新值，请再试一次。',
         )
       }, [blocked, draft, form, routes, snapshot?.revision])
@@ -463,6 +595,75 @@ window.__ModuleLoader__.load({
       }
 
       const projectEntries = Object.entries(draft.projects)
+      const modeEntries = Object.entries(draft.modes)
+
+      /** Id for a new mode: `m1`, `m2`, … skipping any id still in use. */
+      function nextModeId(current) {
+        let n = Object.keys(current).length + 1
+        while (current[`m${n}`] !== undefined) n += 1
+        return `m${n}`
+      }
+
+      function addMode() {
+        if (modeEntries.length >= MODE_LIMIT) return
+        const id = nextModeId(draft.modes)
+        setDraft({
+          ...draft,
+          modes: {
+            ...draft.modes,
+            [id]: { name: defaultModeName(modeEntries.length), ...EMPTY_ROUTE },
+          },
+        })
+      }
+
+      function removeMode(id) {
+        const next = { ...draft.modes }
+        delete next[id]
+        setDraft({ ...draft, modes: next })
+      }
+
+      function patchMode(id, patch) {
+        setDraft({
+          ...draft,
+          modes: { ...draft.modes, [id]: { ...draft.modes[id], ...patch } },
+        })
+      }
+
+      const modeCards = modeEntries.map(([id, entry]) =>
+        React.createElement(
+          'div',
+          {
+            key: id,
+            // Stable hook for tests and for anyone styling their own install.
+            'data-mode-id': id,
+            style: { display: 'grid', gap: 8, padding: 12, border, borderRadius: radius },
+          },
+          React.createElement(
+            'div',
+            { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+            React.createElement('input', {
+              style: { ...control, flex: 1 },
+              placeholder: defaultModeName(modeEntries.findIndex(([key]) => key === id)),
+              value: entry.name,
+              'aria-label': '模式名称',
+              onChange: (event) => patchMode(id, { name: event.target.value }),
+            }),
+            React.createElement(
+              'button',
+              { style: control, type: 'button', onClick: () => removeMode(id) },
+              '移除',
+            ),
+          ),
+          // The same editor the two built-in tracks use: name plus provider,
+          // model and reasoning effort, so a custom mode is exactly as capable.
+          React.createElement(RouteEditor, {
+            title: `模型（${id}）`,
+            catalog,
+            route: entry,
+            onChange: (route) => patchMode(id, route),
+          }),
+        ),
+      )
 
       return React.createElement(
         'section',
@@ -470,11 +671,11 @@ window.__ModuleLoader__.load({
         React.createElement(
           'header',
           { style: { display: 'grid', gap: 4 } },
-          React.createElement('h2', { style: { margin: 0, fontSize: 18 } }, '双轨 · Plan / Act 模型'),
+          React.createElement('h2', { style: { margin: 0, fontSize: 18 } }, '模式与模型'),
           React.createElement(
             'p',
             { style: { margin: 0, color: muted, fontSize: 12 } },
-            '这两组路由是「模式下拉框」的两项。输入框旁的下拉框始终可用，手动选择随时生效；',
+            'Plan / Act 与自定义模式共用同一个「模式下拉框」。手动选择随时生效；',
             '下面的开关只控制自动切换：进入 Plan 模式时自动选 Plan，批准计划后强制选 Act。',
           ),
         ),
@@ -510,116 +711,152 @@ window.__ModuleLoader__.load({
         }),
         React.createElement(
           'div',
-          { style: { display: 'grid', gap: 8 } },
-          React.createElement('strong', { style: { fontSize: 13 } }, '项目覆盖'),
+          { style: { display: 'grid', gap: 8 }, 'data-section': 'custom-modes' },
+          React.createElement('strong', { style: { fontSize: 13 } }, '自定义模式'),
           React.createElement(
             'p',
             { style: { margin: 0, color: muted, fontSize: 12 } },
-            '按工作区根目录覆盖；未列出的项目继承全局配置。留空的 provider/model 视为不完整。',
+            '名称随你取，路由与 Plan / Act 一致（provider、model、effort）。',
+            `最多 ${MODE_LIMIT} 个。它们只出现在下拉框里，供手动选择；`,
+            '进入 Plan 模式或批准计划时仍会自动切回 Plan / Act。',
           ),
+          modeCards,
           React.createElement(
             'div',
-            { style: { display: 'flex', gap: 8 } },
-            React.createElement('input', {
-              style: { ...control, flex: 1 },
-              placeholder: '工作区绝对路径，例如 D:\\work\\repo',
-              value: newPath,
-              onChange: (event) => setNewPath(event.target.value),
-            }),
+            { style: { display: 'flex', gap: 8, alignItems: 'center' } },
             React.createElement(
               'button',
               {
-                style: control,
+                style: { ...control, cursor: modeEntries.length >= MODE_LIMIT ? 'default' : 'pointer' },
                 type: 'button',
-                onClick: () => {
-                  const key = newPath.trim()
-                  if (key === '' || draft.projects[key] !== undefined) return
-                  setDraft({
-                    ...draft,
-                    projects: {
-                      ...draft.projects,
-                      [key]: { mode: 'inherit', plan: { ...draft.plan }, act: { ...draft.act } },
-                    },
-                  })
-                },
+                disabled: modeEntries.length >= MODE_LIMIT,
+                onClick: addMode,
               },
-              '添加',
+              '添加自定义模式',
             ),
+            modeEntries.length >= MODE_LIMIT
+              ? React.createElement(
+                  'span',
+                  { style: { color: muted, fontSize: 12 } },
+                  `已达到上限 ${MODE_LIMIT} 个`,
+                )
+              : null,
           ),
-          projectEntries.length === 0
-            ? React.createElement('span', { style: { color: muted, fontSize: 12 } }, '暂无项目覆盖')
-            : projectEntries.map(([key, entry]) =>
+        ),
+        SHOW_PROJECT_OVERRIDES
+          ? React.createElement(
+              'div',
+              { style: { display: 'grid', gap: 8 } },
+              React.createElement('strong', { style: { fontSize: 13 } }, '项目覆盖'),
+              React.createElement(
+                'p',
+                { style: { margin: 0, color: muted, fontSize: 12 } },
+                '按工作区根目录覆盖；未列出的项目继承全局配置。留空的 provider/model 视为不完整。',
+              ),
+              React.createElement(
+                'div',
+                { style: { display: 'flex', gap: 8 } },
+                React.createElement('input', {
+                  style: { ...control, flex: 1 },
+                  placeholder: '工作区绝对路径，例如 D:\\work\\repo',
+                  value: newPath,
+                  onChange: (event) => setNewPath(event.target.value),
+                }),
                 React.createElement(
-                  'div',
+                  'button',
                   {
-                    key,
-                    style: { display: 'grid', gap: 8, padding: 12, border, borderRadius: radius },
-                  },
-                  React.createElement(
-                    'div',
-                    { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-                    React.createElement('code', { style: { flex: 1, fontSize: 12, wordBreak: 'break-all' } }, key),
-                    React.createElement(
-                      'select',
-                      {
-                        style: control,
-                        value: entry.mode,
-                        onChange: (event) =>
-                          setDraft({
-                            ...draft,
-                            projects: {
-                              ...draft.projects,
-                              [key]: { ...entry, mode: event.target.value },
-                            },
-                          }),
-                      },
-                      React.createElement('option', { value: 'inherit' }, '继承全局'),
-                      React.createElement('option', { value: 'override' }, '项目覆盖'),
-                      React.createElement('option', { value: 'off' }, '此项目禁用'),
-                    ),
-                    React.createElement(
-                      'button',
-                      {
-                        style: control,
-                        type: 'button',
-                        onClick: () => {
-                          const next = { ...draft.projects }
-                          delete next[key]
-                          setDraft({ ...draft, projects: next })
+                    style: control,
+                    type: 'button',
+                    onClick: () => {
+                      const key = newPath.trim()
+                      if (key === '' || draft.projects[key] !== undefined) return
+                      setDraft({
+                        ...draft,
+                        projects: {
+                          ...draft.projects,
+                          [key]: { mode: 'inherit', plan: { ...draft.plan }, act: { ...draft.act } },
                         },
-                      },
-                      '移除',
-                    ),
-                  ),
-                  entry.mode === 'override'
-                    ? React.createElement(
-                        React.Fragment,
-                        null,
-                        React.createElement(RouteEditor, {
-                          title: 'Plan 模式（本项目）',
-                          catalog,
-                          route: entry.plan,
-                          onChange: (route) =>
-                            setDraft({
-                              ...draft,
-                              projects: { ...draft.projects, [key]: { ...entry, plan: route } },
-                            }),
-                        }),
-                        React.createElement(RouteEditor, {
-                          title: 'Act 模式（本项目）',
-                          catalog,
-                          route: entry.act,
-                          onChange: (route) =>
-                            setDraft({
-                              ...draft,
-                              projects: { ...draft.projects, [key]: { ...entry, act: route } },
-                            }),
-                        }),
-                      )
-                    : null,
+                      })
+                    },
+                  },
+                  '添加',
                 ),
               ),
-        ),
+              projectEntries.length === 0
+                ? React.createElement('span', { style: { color: muted, fontSize: 12 } }, '暂无项目覆盖')
+                : projectEntries.map(([key, entry]) =>
+                    React.createElement(
+                      'div',
+                      {
+                        key,
+                        style: { display: 'grid', gap: 8, padding: 12, border, borderRadius: radius },
+                      },
+                      React.createElement(
+                        'div',
+                        { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+                        React.createElement('code', { style: { flex: 1, fontSize: 12, wordBreak: 'break-all' } }, key),
+                        React.createElement(
+                          'select',
+                          {
+                            style: control,
+                            value: entry.mode,
+                            onChange: (event) =>
+                              setDraft({
+                                ...draft,
+                                projects: {
+                                  ...draft.projects,
+                                  [key]: { ...entry, mode: event.target.value },
+                                },
+                              }),
+                          },
+                          React.createElement('option', { value: 'inherit' }, '继承全局'),
+                          React.createElement('option', { value: 'override' }, '项目覆盖'),
+                          React.createElement('option', { value: 'off' }, '此项目禁用'),
+                        ),
+                        React.createElement(
+                          'button',
+                          {
+                            style: control,
+                            type: 'button',
+                            onClick: () => {
+                              const next = { ...draft.projects }
+                              delete next[key]
+                              setDraft({ ...draft, projects: next })
+                            },
+                          },
+                          '移除',
+                        ),
+                      ),
+                      entry.mode === 'override'
+                        ? React.createElement(
+                            React.Fragment,
+                            null,
+                            React.createElement(RouteEditor, {
+                              title: 'Plan 模式（本项目）',
+                              catalog,
+                              route: entry.plan,
+                              onChange: (route) =>
+                                setDraft({
+                                  ...draft,
+                                  projects: { ...draft.projects, [key]: { ...entry, plan: route } },
+                                }),
+                            }),
+                            React.createElement(RouteEditor, {
+                              title: 'Act 模式（本项目）',
+                              catalog,
+                              route: entry.act,
+                              onChange: (route) =>
+                                setDraft({
+                                  ...draft,
+                                  projects: { ...draft.projects, [key]: { ...entry, act: route } },
+                                }),
+                            }),
+                          )
+                        : null,
+                    ),
+                  ),
+            )
+          : null,
         React.createElement(
           'div',
           { style: { display: 'flex', gap: 8, alignItems: 'center' } },
@@ -682,6 +919,8 @@ window.__ModuleLoader__.load({
 .pam-trigger[data-tone="plan"] .pam-dot{background:var(--dsw-alias-state-business-primary,#247bbf)}
 .pam-trigger[data-tone="act"] .pam-mode,.pam-option[data-tone="act"] .pam-mode{color:var(--dsw-alias-state-success-primary,#22a05b)}
 .pam-trigger[data-tone="act"] .pam-dot{background:var(--dsw-alias-state-success-primary,#22a05b)}
+.pam-trigger[data-tone="mode"] .pam-mode,.pam-option[data-tone="mode"] .pam-mode{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
+.pam-trigger[data-tone="mode"] .pam-dot{background:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .pam-trigger[data-tone="custom"] .pam-mode,.pam-option[data-tone="custom"] .pam-mode{color:var(--dsw-alias-label-tertiary,currentColor)}
 .pam-trigger[data-tone="custom"] .pam-dot{opacity:.5}
 .pam-menu{position:absolute;right:0;bottom:calc(100% + 8px);z-index:20;display:flex;flex-direction:column;gap:2px;width:min(280px,calc(100vw - 32px));max-height:min(320px,60vh);overflow-y:auto;padding:4px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,0.45));border-radius:12px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-3,#1b1b1c));box-shadow:0 12px 32px rgba(0,0,0,.24),0 2px 8px rgba(0,0,0,.12);color:var(--dsw-alias-label-primary,currentColor)}
@@ -693,6 +932,7 @@ window.__ModuleLoader__.load({
 .pam-check{flex:none;display:grid;place-items:center;width:14px;height:14px;margin-right:6px;color:var(--dsw-alias-label-secondary,currentColor)}
 .pam-option[data-tone="plan"] .pam-check{color:var(--dsw-alias-state-business-primary,#247bbf)}
 .pam-option[data-tone="act"] .pam-check{color:var(--dsw-alias-state-success-primary,#22a05b)}
+.pam-option[data-tone="mode"] .pam-check{color:var(--dsw-alias-state-warn-primary,#f59e0b)}
 .pam-check--hidden{visibility:hidden}
 .pam-failure{font-size:11px;color:var(--dsw-alias-state-error-primary,#d14343);max-width:220px;overflow:hidden;text-overflow:ellipsis}
 @container (width<=460px){.pam-model{max-width:110px}}
@@ -876,20 +1116,30 @@ window.__ModuleLoader__.load({
       const committed = selection?.next ?? selection?.lastUsed ?? null
       const track = mirrorTrackOf(committed, value, cwd, mode)
 
-      const targets = {
-        plan: mirrorResolve(value, cwd, 'plan'),
-        act: mirrorResolve(value, cwd, 'act'),
-      }
+      // Every track the menu offers: the two built-ins, then the user's own modes
+      // in the order they were added. Resolution happens per track so an entry
+      // that cannot be selected still renders with its own explanation.
+      const tracks = mirrorTracks(value)
+      const targets = {}
+      for (const item of tracks) targets[item.id] = mirrorResolve(value, cwd, item.id)
       // An entry is offered only when it names a route the Host can switch to; an
       // incomplete one or a disabled project is shown but not selectable, so the
       // option still explains itself instead of vanishing.
-      const offerable = (name) => targets[name].kind === 'route' && canSelect === true
-      const label = track === null ? customLabel(committed, catalog) : routeLabel(track, targets[track], catalog)
+      const offerable = (name) => targets[name]?.kind === 'route' && canSelect === true
+      const nameOf = (name) => tracks.find((item) => item.id === name)?.name
+      // Three tones for three kinds of entry: the two built-ins keep their own
+      // accent, the `custom` placeholder stays neutral, every user-defined mode
+      // shares one accent so a long menu still reads as "mine" at a glance.
+      const toneOf = (name) =>
+        name === 'plan' || name === 'act' || name === 'custom' ? name : CUSTOM_TONE
+      const labelOf = (name) => routeLabel(name, targets[name], catalog, nameOf(name))
+
+      const label = track === null ? customLabel(committed, catalog) : labelOf(track)
       // Say why the control is inert instead of letting a pick fail. `canSelect`
       // is false only when the Host has no `session.selectModel` at all.
       const reason =
         canSelect !== true ? ' · 宿主不支持切换模型' : enabled ? '' : ' · 自动切换已关闭'
-      const title = `${track === null ? customTitle(committed) : routeTitle(track, targets[track], catalog)}${reason}`
+      const title = `${track === null ? customTitle(committed) : routeTitle(track, targets[track], catalog, nameOf(track))}${reason}`
 
       function choose(name) {
         if (name === track) return undefined
@@ -916,7 +1166,8 @@ window.__ModuleLoader__.load({
           .then(() => setBusy(false))
       }
 
-      const options = [track === null ? 'custom' : null, 'plan', 'act'].filter((item) => item !== null)
+      const options = [track === null ? 'custom' : null, ...tracks.map((item) => item.id)]
+        .filter((item) => item !== null)
       const selected = track === null ? 'custom' : track
       // A row that cannot be picked still renders and still explains itself; the
       // menu never silently drops an entry the user configured.
@@ -1033,7 +1284,7 @@ window.__ModuleLoader__.load({
           {
             type: 'button',
             className: 'pam-trigger',
-            'data-tone': selected,
+            'data-tone': toneOf(selected),
             'data-open': open ? 'true' : 'false',
             'aria-label': label,
             'aria-haspopup': 'listbox',
@@ -1058,14 +1309,16 @@ window.__ModuleLoader__.load({
                 className: 'pam-menu',
                 id: menuId,
                 role: 'listbox',
-                'aria-label': 'Plan / Act 模型',
+                'aria-label': '模式与模型',
                 tabIndex: -1,
                 onKeyDown: onMenuKeyDown,
                 style: { opacity: 1 },
               },
               options.map((name, index) => {
-                const pick = name === 'custom' ? customLabel(committed, catalog) : routeLabel(name, targets[name], catalog)
-                const hint = name === 'custom' ? customTitle(committed) : routeTitle(name, targets[name], catalog)
+                const pick = name === 'custom' ? customLabel(committed, catalog) : labelOf(name)
+                const hint = name === 'custom'
+                  ? customTitle(committed)
+                  : routeTitle(name, targets[name], catalog, nameOf(name))
                 const isPickable = name !== 'custom' && offerable(name)
                 return React.createElement(
                   'button',
@@ -1074,7 +1327,8 @@ window.__ModuleLoader__.load({
                     type: 'button',
                     className: 'pam-option',
                     role: 'option',
-                    'data-tone': name,
+                    'data-tone': toneOf(name),
+                    'data-mode-id': name === 'custom' || nameOf(name) === undefined ? undefined : name,
                     'data-active': active === index ? 'true' : 'false',
                     'aria-selected': name === selected ? 'true' : 'false',
                     'aria-disabled': isPickable ? undefined : 'true',
@@ -1167,7 +1421,7 @@ window.__ModuleLoader__.load({
               name: 'settings.section',
               id: ENTRY,
               order: 60,
-              label: () => '双轨 · Plan / Act 模型',
+              label: () => '模式与模型',
               inject: () => ({ form, remote: ctx.remote }),
             },
             RouterSection,

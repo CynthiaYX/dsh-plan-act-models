@@ -175,6 +175,7 @@ function harness(overrides = {}) {
     enabled: { get: () => overrides.enabled ?? true },
     plan: { get: () => overrides.plan ?? PLAN_ROUTE },
     act: { get: () => overrides.act ?? ACT_ROUTE },
+    modes: { get: () => overrides.modes ?? {} },
     projects: { get: () => overrides.projects ?? {} },
   }
 
@@ -402,6 +403,85 @@ test('an approved plan that already committed the Act route is a no-op', async (
   await settle()
 
   assert.deepEqual(calls, [])
+})
+
+// --- custom modes are manual-only -----------------------------------------
+
+/** One complete custom mode, as the settings page would store it. */
+const REVIEW_MODE = { m1: { name: '审查', provider: 'local', model: 'reviewer', reasoningEffort: 'low' } }
+
+test('no Host event ever switches *to* a custom mode', async () => {
+  // The whole point of the feature: a custom mode is reachable only through the
+  // dropdown. Both automatic rules run with the mode present and a selection on
+  // it; neither may produce a call that carries the custom route, because the
+  // rules only ever name `plan` or `act`.
+  const agent = newAgent('root-1')
+  const custom = { provider: 'local', model: 'reviewer', reasoningEffort: 'low' }
+  const { events, calls } = harness({ roots: [agent], modes: REVIEW_MODE, selection: custom })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.equal(
+    calls.some((call) => call.provider === custom.provider && call.model === custom.model),
+    false,
+    'a custom route must never be committed by an automatic rule',
+  )
+  // They do fire — onto the built-in tracks — which is decision B, pinned below.
+  assert.deepEqual(calls.map((call) => call.reasoningEffort), [PLAN_ROUTE.reasoningEffort, ACT_ROUTE.reasoningEffort])
+})
+
+test('entering plan mode overrides a custom selection', async () => {
+  // Decided with the plan: the two automatic rules keep their meaning, so a
+  // custom mode is stepped over rather than honoured on mode entry.
+  const agent = newAgent('root-1')
+  const { events, calls } = harness({
+    roots: [agent],
+    modes: REVIEW_MODE,
+    selection: { provider: 'local', model: 'reviewer', reasoningEffort: 'low' },
+  })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
+
+  assert.deepEqual(calls, [{ sessionId: 'root-1', ...PLAN_ROUTE }])
+})
+
+test('an approved plan overrides a custom selection', async () => {
+  const agent = newAgent('root-1')
+  const { calls } = harness({
+    roots: [agent],
+    modes: REVIEW_MODE,
+    selection: { provider: 'local', model: 'reviewer', reasoningEffort: 'low' },
+  })
+
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.deepEqual(calls, [{ sessionId: 'root-1', ...ACT_ROUTE }])
+})
+
+test('a broken custom mode does not disturb the two automatic rules', async () => {
+  // The Host resolves only the built-in tracks when it switches, so an
+  // incomplete custom entry must not produce a warning or block either rule.
+  const agent = newAgent('root-1')
+  const { events, calls, warnings } = harness({
+    roots: [agent],
+    modes: { m1: { name: '待补', provider: 'local', model: '' } },
+  })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.deepEqual(calls, [
+    { sessionId: 'root-1', ...PLAN_ROUTE },
+    { sessionId: 'root-1', ...ACT_ROUTE },
+  ])
+  assert.deepEqual(warnings, [])
 })
 
 // --- shared stand-aside conditions ----------------------------------------

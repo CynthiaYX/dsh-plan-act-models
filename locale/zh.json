@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "双轨 · Plan / Act 模型",
-    "description": "Plan 模式与 Act 模式各用一组模型与思考复杂度；离开 Plan 之后的第一条请求即切换。"
+    "title": "模式与模型",
+    "description": "Plan、Act 与自定义模式各用一组模型与思考复杂度；自动切换只在进出 Plan 时发生，自定义模式仅由手动选择触发。"
   }
 }

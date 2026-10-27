@@ -2,7 +2,7 @@
   "name": "dsh-plan-act-models",
   "version": "0.4.0",
   "type": "module",
-  "description": "A Plan/Act dropdown in the composer that commits through the Host's own model selection, plus two optional automatic switches.",
+  "description": "A mode dropdown in the composer that commits through the Host's own model selection — Plan, Act, and any number of user-defined modes — plus two optional automatic switches.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,6 +14,7 @@
     "dsh-plugin",
     "plan",
     "act",
+    "mode",
     "model",
     "model-selection",
     "reasoning-effort"

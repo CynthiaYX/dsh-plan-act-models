@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-import { resolveTarget, sessionTrack } from '../lib/routing.mjs'
+import { resolveTarget, sessionTrack, customName, customTracks } from '../lib/routing.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
@@ -46,6 +46,10 @@ function loadMirror() {
        mirrorMode,
        mirrorSameTrack,
        mirrorTrackOf,
+       mirrorModes,
+       mirrorModeName,
+       mirrorCustomTracks,
+       mirrorTracks,
        routeLabel,
        routeDetail,
        routeTitle,
@@ -54,6 +58,7 @@ function loadMirror() {
        routeName,
        LABEL_SEPARATOR,
        MODE_WORDS,
+       CUSTOM_TONE,
      }`,
   )
   return evaluate()
@@ -176,6 +181,61 @@ const MATRIX = [
     path: 'D:/',
     mode: 'plan',
   },
+  // --- custom modes ---
+  {
+    name: 'custom mode resolves from the global table',
+    config: { ...pair(), modes: { m1: { name: '审查', provider: 'q', model: 'n', reasoningEffort: 'low' } } },
+    path: '',
+    mode: 'm1',
+  },
+  {
+    name: 'custom mode ignores a project override',
+    config: {
+      ...pair({ 'd:/repo': override() }),
+      modes: { m1: { name: '审查', provider: 'q', model: 'n', reasoningEffort: 'low' } },
+    },
+    path: 'd:/repo',
+    mode: 'm1',
+  },
+  {
+    name: 'custom mode is silenced by a dead project',
+    config: {
+      ...pair({ 'd:/repo': { mode: 'off' } }),
+      modes: { m1: { name: '审查', provider: 'q', model: 'n' } },
+    },
+    path: 'd:/repo',
+    mode: 'm1',
+  },
+  {
+    name: 'incomplete custom mode blocks alone',
+    config: { ...pair(), modes: { m1: { name: '审查', provider: 'q', model: '' } } },
+    path: '',
+    mode: 'm1',
+  },
+  {
+    name: 'custom mode without a name still resolves',
+    config: { ...pair(), modes: { m1: { provider: 'q', model: 'n' } } },
+    path: '',
+    mode: 'm1',
+  },
+  {
+    name: 'an id that is not in the table',
+    config: { ...pair(), modes: { m1: { provider: 'q', model: 'n' } } },
+    path: '',
+    mode: 'm2',
+  },
+  {
+    name: 'modes as a volatile cell',
+    config: { ...pair(), modes: { get: () => ({ m1: { name: '审查', provider: 'q', model: 'n' } }) } },
+    path: '',
+    mode: 'm1',
+  },
+  {
+    name: 'a modes cell holding an array is ignored',
+    config: { ...pair(), modes: [] },
+    path: '',
+    mode: 'm1',
+  },
 ]
 
 /**
@@ -238,9 +298,19 @@ test('the mirrored track finder matches lib/routing.mjs on every combination', (
     { plan: { provider: 'p', model: 'm', reasoningEffort: 'max' }, act: { provider: 'p', model: 'm', reasoningEffort: 'max' } },
     {},
     undefined,
+    // Custom modes: one that owns its own route, one that collides with a
+    // built-in, one that is incomplete, one with no name at all.
+    { ...pair(), modes: { m1: { name: '审查', provider: 'q', model: 'n', reasoningEffort: 'low' } } },
+    { ...pair(), modes: { m1: { name: '也是 Plan', provider: 'p', model: 'm', reasoningEffort: 'max' } } },
+    { ...pair(), modes: { m1: { name: '待补', provider: 'q', model: '' } } },
+    { ...pair(), modes: { m1: { provider: 'q', model: 'n' } } },
+    {
+      ...pair(),
+      modes: { m1: { name: '甲', provider: 'q', model: 'n' }, m2: { name: '乙', provider: 'q', model: 'n' } },
+    },
   ]
   const paths = ['', 'C:/work', 'd:/repo', 'd:/repo/']
-  const modes = ['plan', 'act']
+  const modes = ['plan', 'act', 'm1', 'm2']
   for (const config of configs) {
     for (const path of paths) {
       for (const mode of modes) {
@@ -264,6 +334,64 @@ test('the mirrored helpers agree with their originals in isolation', () => {
   assert.equal(mirror.mirrorMode({ mode: 'off' }), 'off')
   assert.deepEqual(mirror.mirrorRoute({ provider: ' p ', model: ' m ' }), { provider: 'p', model: 'm' })
   assert.equal(mirror.mirrorRoute({ provider: 'p' }), null)
+})
+
+test('the mirrored custom-mode table matches lib/routing.mjs entry for entry', () => {
+  const configs = [
+    {},
+    undefined,
+    { modes: [] },
+    { modes: { m1: { name: '审查', provider: 'q', model: 'n' } } },
+    { modes: { m1: { name: '  ', provider: 'q', model: 'n' }, m2: { provider: 'q', model: '' } } },
+    { modes: { get: () => ({ m1: { name: '审查', provider: 'q', model: 'n' } }) } },
+  ]
+  for (const config of configs) {
+    assert.deepEqual(
+      mirror.mirrorCustomTracks(config),
+      customTracks(config),
+      `mirror diverged from customTracks for ${JSON.stringify(config)}`,
+    )
+    // The name fallback is the one string a user actually reads, so it is pinned
+    // on its own rather than only through the table above.
+    for (const [index, id] of Object.keys(mirror.mirrorModes(config)).entries()) {
+      assert.equal(
+        mirror.mirrorModeName(mirror.mirrorModes(config)[id], index),
+        customName(mirror.mirrorModes(config)[id], index),
+        `mirror diverged from customName at index ${index}`,
+      )
+    }
+  }
+})
+
+test('the mirrored track list is plan, act, then the custom modes', () => {
+  const tracks = mirror.mirrorTracks({ modes: { m1: { name: '审查', provider: 'q', model: 'n' } } })
+  assert.deepEqual(tracks.map((track) => track.id), ['plan', 'act', 'm1'])
+  assert.equal(tracks[2].name, '审查')
+  assert.equal(tracks[2].builtin, false)
+  assert.deepEqual(mirror.mirrorTracks({}), [
+    { id: 'plan', name: 'Plan', builtin: true },
+    { id: 'act', name: 'Act', builtin: true },
+  ])
+})
+
+test('a custom mode labels itself with the user’s own name', () => {
+  const config = { modes: { m1: { name: '审查', provider: 'q', model: 'n', reasoningEffort: 'low' } } }
+  const resolved = mirror.mirrorResolve(config, '', 'm1')
+  assert.equal(mirror.routeLabel('m1', resolved, null, '审查'), '审查：n')
+  // Without the display name it still says something: never `undefined：n`.
+  assert.equal(mirror.routeLabel('m1', resolved, null), 'm1：n')
+  // An incomplete custom mode reads as unconfigured, not as an empty model.
+  const broken = mirror.mirrorResolve({ modes: { m1: { name: '待补', provider: 'q', model: '' } } }, '', 'm1')
+  assert.equal(mirror.routeLabel('m1', broken, null, '待补'), '待补：未配置')
+})
+
+test('a custom mode has one tone of its own', () => {
+  assert.equal(mirror.CUSTOM_TONE, 'mode')
+  // The tone must not collide with the two built-ins or the placeholder, which
+  // is what keeps a menu with a dozen entries scannable.
+  assert.notEqual(mirror.CUSTOM_TONE, 'plan')
+  assert.notEqual(mirror.CUSTOM_TONE, 'act')
+  assert.notEqual(mirror.CUSTOM_TONE, 'custom')
 })
 
 test('mirrorSameTrack follows the effort only when the route pins one', () => {

@@ -53,6 +53,12 @@ test('the resolved namespace builds the schema shapes index.js declares', async 
     model: z.string().default(''),
     reasoningEffort: z.string().default(''),
   })
+  const CustomMode = z.object({
+    name: z.string().default(''),
+    provider: z.string().default(''),
+    model: z.string().default(''),
+    reasoningEffort: z.string().default(''),
+  })
   const ProjectEntry = z.object({
     mode: z.union(['inherit', 'override', 'off']).default('inherit'),
     plan: Route.default({}),
@@ -62,6 +68,7 @@ test('the resolved namespace builds the schema shapes index.js declares', async 
     enabled: z.boolean().default(false).volatile(),
     plan: Route.volatile(),
     act: Route.volatile(),
+    modes: z.dict(CustomMode).default({}).volatile(),
     projects: z.dict(ProjectEntry).default({}).volatile(),
   })
 
@@ -69,6 +76,14 @@ test('the resolved namespace builds the schema shapes index.js declares', async 
   assert.equal(config.enabled.get(), false)
   assert.deepEqual(config.plan.get(), { provider: '', model: '', reasoningEffort: '' })
   assert.deepEqual(config.projects.get(), {})
+  assert.deepEqual(config.modes.get(), {})
+
+  // A custom mode fills in every field the two built-in tracks have, so the
+  // settings page can bind the same editor to it.
+  const withMode = Config({ modes: { m1: { name: '审查', provider: 'p', model: 'm' } } })
+  assert.deepEqual(withMode.modes.get(), {
+    m1: { name: '审查', provider: 'p', model: 'm', reasoningEffort: '' },
+  })
 
   // The union is what rejects a hand-edited project entry.
   assert.throws(

@@ -45,6 +45,20 @@ const Route = z.object({
   reasoningEffort: z.string().default(''),
 })
 
+/**
+ * One user-defined mode: a display name plus the same route a track carries.
+ *
+ * The table is keyed by an id the client generates (`m1`, `m2`, …). The name is
+ * presentation only — the session stores the provider/model/effort it was
+ * switched to, never the mode id — so renaming a mode never disturbs a session.
+ */
+const CustomMode = z.object({
+  name: z.string().default(''),
+  provider: z.string().default(''),
+  model: z.string().default(''),
+  reasoningEffort: z.string().default(''),
+})
+
 const ProjectEntry = z.object({
   mode: z.union(['inherit', 'override', 'off']).default('inherit'),
   plan: Route.default({}),
@@ -56,6 +70,7 @@ export const Config = z.object({
   enabled: z.boolean().default(false).volatile(),
   plan: Route.volatile(),
   act: Route.volatile(),
+  modes: z.dict(CustomMode).default({}).volatile(),
   projects: z.dict(ProjectEntry).default({}).volatile(),
 })
 
@@ -71,6 +86,9 @@ function readConfig(config) {
     enabled: unref(config?.enabled) === true,
     plan: unref(config?.plan),
     act: unref(config?.act),
+    // Read only so `sessionTrack` can tell whether a committed selection sits on
+    // a custom mode. No automatic rule ever switches *to* one.
+    modes: unref(config?.modes),
     projects: unref(config?.projects),
   }
 }

@@ -1,15 +1,20 @@
-# 双轨 · Plan / Act 模型（dsh-plan-act-models）
+# 模式与模型（dsh-plan-act-models）
 
-给 DeepSeek Harness 的对话框加一个 **Plan / Act 模式下拉框**，并按模式自动切换模型：
+给 DeepSeek Harness 的对话框加一个**模式下拉框**，并按模式自动切换模型：
 
-- 对话框底部、原生模型选择器左侧是一个**真正的下拉框**，两项：`Plan：<模型>` / `Act：<模型>`。
-  选它就等于用宿主原生的方式换模型 —— 调的是 `session.selectModel`，所以下拉框和原生选择器
-  永远显示同一个结果，重启后也还在（选择存在 `model/selection` 投影里）。
+- 对话框底部、原生模型选择器左侧是一个**真正的下拉框**：`Plan`、`Act`，以及你自己加的任意个
+  **自定义模式**，每一项都是 `模式名：<模型>`。选它就等于用宿主原生的方式换模型 —— 调的是
+  `session.selectModel`，所以下拉框和原生选择器永远显示同一个结果，重启后也还在
+  （选择存在 `model/selection` 投影里）。
+- **自定义模式**由你命名，绑定自己的 provider / model / reasoningEffort，能力和 Plan / Act 完全一致
+  （同样的目录校验、同样的提交路径、同样进菜单）。区别只有一条：**它只在你手动选择时生效**，
+  插件永远不会自动切到自定义模式。
 - **plan 模式与模型的强绑定已经解除**：`/plan`、对话框上的 Plan 芯片、审批都不再隐式决定模型。
-  进入 plan 只是**软切换**到 Plan 那一项，你可以立刻改回 Act，插件不会跟你抢。
+  进入 plan 只是**软切换**到 Plan 那一项，你可以立刻改回 Act 或某个自定义模式，插件不会跟你抢。
 - 唯一保留的硬规则：**批准计划进入「实施」那一刻，强制切到 Act**（忽略之前选的是什么）。
-  判定只认 `exit_plan_mode` 返回 `approved: true`。
-- 设置页那两组路由就是下拉框里的两项。`enabled` 只是**自动切换的总开关**；
+  判定只认 `exit_plan_mode` 返回 `approved: true`。这条规则和上面的软切换一样，会**盖过**
+  当前选中的自定义模式 —— 那是「进入 plan / 批准计划」的既定语义，不想被盖过就别让这两个事件发生。
+- 设置页那几组路由就是下拉框里的各项。`enabled` 只是**自动切换的总开关**；
   关掉它，下拉框照样能手动切。
 - 插件不存 API Key，全部复用宿主凭据；**不接管 subagent / 后台委派任务**。
 
@@ -38,7 +43,7 @@
   > `dsh-plan-act-models-0.4.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
   > 把 `latest` 换成新 tag 可以锁定版本。
 
-配置入口：**设置 → 双轨 · Plan / Act 模型**（首次默认关闭自动切换）。
+配置入口：**设置 → 模式与模型**（首次默认关闭自动切换）。
 
 ### 本机开发时的链接安装
 
@@ -77,7 +82,7 @@ Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh
 
 本包**尚未发布到 npm**，GitHub Release 才是当前的发布通道。发布前依次确认：
 
-1. `node --test` 全绿（143 个用例）。
+1. `node --test` 全绿（176 个用例）。
 2. `npm pack --dry-run` 的文件列表里没有 `lib/*.js`（该 glob 曾指向不存在的文件）。
 3. `package.json` 无 `private`，`license` 与 `repository` 齐全。
 4. `cordis.patch.yml` 的 `id` 与 `client.js` 的 `ENTRY` 逐字相同 —— `client.test.mjs`
@@ -92,14 +97,39 @@ Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh
 | `enabled` | **自动切换**总开关。关闭后不再自动切模型；下拉框仍可手选。 |
 | `plan` | 下拉框里 `Plan` 那一项：`provider`、`model`、`reasoningEffort`（留空 = 跟随模型默认）。 |
 | `act` | 下拉框里 `Act` 那一项，同上。 |
+| `modes` | **自定义模式表**：键是稳定 id（页面按 `m1`、`m2`… 生成），值是 `name` + 与上面同样的三项路由。 |
 | `projects` | 按工作区根目录（`session.header.cwd`）的覆盖表：`inherit` / `override` / `off`。 |
 
-项目覆盖是**完整的一对**，不做半合并；项目设为 `off` 时该项目内两项都不可选。
+项目覆盖是**完整的一对**，不做半合并；项目设为 `off` 时该项目内所有模式都不可选。
+它只覆盖 Plan / Act 两项 —— 自定义模式是全局的，**不参与项目覆盖**（页面上也暂时不提供这个编辑器，
+见「已知限制」）。
+
+### 自定义模式
+
+`modes` 里每个条目就是菜单里多出来的一项，路由能力和 Plan / Act 完全一致：
+
+```yaml
+modes:
+  m1:
+    name: 审查
+    provider: cline-pass
+    model: deepseek-v4.1-flash-1017
+    reasoningEffort: low
+```
+
+- **名字只用于显示**。会话里存的是切到的 provider/model/effort，不是模式 id ——
+  所以改名、删掉、重新排一遍都不会影响已经在跑（或已经存盘）的会话。
+- `name` 留空时按位置退化成 `模式 1`、`模式 2`…；设置页保存时也会写入同样的默认名，
+  所以页面和宿主对同一个条目的叫法一致。
+- 设置页最多 12 个（`MODE_LIMIT`）；这是**页面**的上限，宿主按配置里写多少就渲染多少。
+- 一个条目 provider/model 不全时，它照样出现在菜单里、标成 `未配置` 且不可点 ——
+  不静默消失，你能看见自己配错了哪一项。
+- 顺序 = 配置里的书写顺序，永远排在 Plan、Act 之后。
 
 ## 对话框里的模式下拉框
 
 composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（圆角 + 模式圆点 + 着色模式词 + 箭头），
-点开后向上弹出宿主风格的卡片菜单。**Plan 的模式词是蓝色、Act 是绿色、`自定义` 是虚线灰**，
+点开后向上弹出宿主风格的卡片菜单。**Plan 是蓝色、Act 是绿色、自定义模式是琥珀色、`自定义` 占位是虚线灰**，
 模型名本身用次级文本色 —— 所以扫一眼就知道当前在哪条轨上。
 
 它不是 `<select>`：原生弹出层无法着色，这正是旧版看起来像一颗跑错片场的系统控件的原因。
@@ -107,19 +137,20 @@ composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（�
 
 | 情况 | 下拉框显示 |
 | --- | --- |
-| 会话当前选择 = Plan 那一项 | `Plan：DeepSeek V4.1 Flash` |
-| 会话当前选择 = Act 那一项 | `Act：DeepSeek V4.1 Flash` |
-| 当前选择**两项都不是**（在原生选择器里手动换过模型） | `自定义：<模型>`（灰、虚线边框、不可选，只说明现状） |
-| 当前工作区在 `projects` 里被设为 `off` | 两项都灰掉并标 `此项目已停用` |
+| 会话当前选择 = `Plan` 那一项 | `Plan：DeepSeek V4.1 Flash` |
+| 会话当前选择 = `Act` 那一项 | `Act：DeepSeek V4.1 Flash` |
+| 会话当前选择 = 某个自定义模式 | `审查：DeepSeek V4.1 Flash`（琥珀色） |
+| 当前选择**哪一项都不是**（在原生选择器里手动换过模型） | `自定义：<模型>`（灰、虚线边框、不可选，只说明现状） |
+| 当前工作区在 `projects` 里被设为 `off` | 所有项都灰掉并标 `此项目已停用` |
 | 某项 provider/model 不完整 | 该项灰掉并标 `未配置` |
-| 宿主没有 `session.selectModel` | 两项都灰掉，悬停提示 `宿主不支持切换模型`（菜单仍可打开，那里写着原因） |
+| 宿主没有 `session.selectModel` | 所有项都灰掉，悬停提示 `宿主不支持切换模型`（菜单仍可打开，那里写着原因） |
 
 - **显示哪一项只看会话已提交的模型选择**，不看 plan 模式。所以在 plan 模式下选 Act 是允许的，
-  下拉框会如实显示 `Act`。`plan` 投影只用来在两项配置完全相同时（provider/model/effort 一样）
-  决定先选中哪一个。
+  下拉框会如实显示 `Act`。`plan` 投影只用来在几项配置完全相同时（provider/model/effort 一样）
+  决定先选中哪一个 —— 并列时**内建的 Plan / Act 优先**，不会被同路由的自定义模式顶掉。
 - 选项文字里的模型名优先用模型目录的 `name`，查不到退回 model id；**思考复杂度不进正文**，只在悬停提示里：
   `Plan：DeepSeek V4.1 Flash — cline-pass/deepseek-v4.1-flash-1017 (max) · 全局配置`
-  （来自项目覆盖时末尾是 `· 项目覆盖：<工作区>`）。
+  （来自项目覆盖时末尾是 `· 项目覆盖：<工作区>`；自定义模式永远显示 `· 全局配置`，因为它不参与覆盖）。
 - 切一项 = 调宿主的 `session.selectModel`。它的三个副作用都是宿主原生的：
   校验路由 → 更新 `model/selection` 投影（所有客户端立刻同步）→ 写进会话日志。
   **同时会把该选择存成 profile 的全局默认模型**，与手动改原生选择器完全等价。
@@ -133,15 +164,18 @@ composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（�
 
 ## 两条自动规则
 
-两条都受 `enabled` 与项目 `off` 约束，都不完整则跳过并各告警一次：
+两条都受 `enabled` 与项目 `off` 约束，都不完整则跳过并各告警一次。
+**两条都不会切到自定义模式** —— 它们只认内建的 Plan / Act，那是这两个事件本来的语义。
 
 1. **进入 plan → 切到 Plan 那一项**（软切换）。判定依据是宿主 `plan/mode` 事件里 `active: true`，
    不是消息里的 `/plan` 文本。如果当前选择已经算 Plan 那一项就什么都不做；如果 Plan 那项没写
-   `reasoningEffort`，则保留你手选的 effort（视为"跟随默认"）。切换完成后你随时可以改回 Act。
+   `reasoningEffort`，则保留你手选的 effort（视为"跟随默认"）。切换完成后你随时可以改回 Act
+   或某个自定义模式。
 2. **批准计划 → 切到 Act 那一项**（硬规则）。判定依据只有一条：
    `exit_plan_mode` 的工具结果 `value.approved === true` 且不是错误结果。
    `keep planning`、失败、其它任何工具都绝不触发。
 
+以上两条都会**盖过**你当前选中的自定义模式（选的是自定义模式时，它们照常把模型切回 Plan / Act）。
 离开 plan 模式（`/plan off`、计划被取消）**不碰模型**。这就是本次改动脱钩的地方。
 
 ## 状态说明
@@ -155,11 +189,12 @@ composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（�
 
 ## 已知限制
 
-1. **两条配置都不写 `reasoningEffort` 时，下拉框无法区分两项**：provider 与 model 都一样，
-   "当前在哪一项"没有可比较的差异，此时按 plan 模式决出显示项（tie-break），
-   选另一项的效果也只是把 effort 改回默认。
+1. **几项配置都不写 `reasoningEffort` 时，下拉框无法区分它们**：provider 与 model 都一样，
+   "当前在哪一项"没有可比较的差异，此时按 plan 模式决出显示项（tie-break），内建的 Plan / Act
+   在并列时优先；选另一个同路由的条目效果只是把 effort 改回默认。
 2. 手动在原生选择器里换到的模型若恰好等于某一项的 route，会显示成那一项（语义等价，不算错）。
-3. `enabled` 关闭只停自动切换；它不会锁住下拉框，也不会阻止你手选一个和 plan 模式不匹配的模型。
+3. `enabled` 关闭只停自动切换；它不会锁住下拉框，也不会阻止你手选一个和 plan 模式不匹配的模型，
+   或手选一个自定义模式。
 4. 若被链接安装（目录 junction / `link:`），`lib/schema.mjs` 会依次尝试裸导入宿主安装里的
    `@deepseek-ai/schemastery`、`DSH_SCHEMASTER_ROOT` 指定的副本、从 `process.execPath` 与启动参数
    往上回溯找到的 `resources/app.asar` / `app.asar.unpacked` 副本（回溯 8 层，也接受相邻的普通
@@ -177,6 +212,12 @@ composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（�
    `locale` 字样（`test/client.test.mjs` 有既有断言）。
 8. **`conversation.input.right` 目前无人占用**，所以我们的条目稳定落在模型选择器左侧；若将来有别的
    包也注册到同一个座位，顺序由 `order` 决定（本插件是 100），届时可能需要重新排序。
+9. **项目覆盖编辑器暂时从设置页隐藏**（`client.js` 里 `SHOW_PROJECT_OVERRIDES = false`）。
+   宿主仍然解析 `projects`、测试仍然覆盖它、手写的覆盖照旧生效；只是页面上不再提供入口 ——
+   一个"含义随文件夹变"的下拉框比它解决的问题更让人困惑。代码一行没删，把那个常量改成 `true`
+   就恢复。隐藏期间页面**不会**因为一条手写的、不完整的覆盖而拒绝保存，也不会在保存时抹掉它。
+10. **自定义模式是全局的**：它不参与 `projects` 覆盖，也不会被两条自动规则选中，
+    只在你手动点选时生效。
 
 ## 开发
 
@@ -190,18 +231,20 @@ npm test
 
 - 八个用例文件都只依赖 `node:test` 与包内源码，**不需要**运行中的 Host：
   `routing.test.mjs` 跑纯决策表（`resolveTarget` 矩阵、`sameTrack`/`sessionTrack`、
-  两个 switch 的真值表），
+  `customTracks`/`customName`/`tracksOf`、两个 switch 的真值表），
   `host.test.mjs` 直接 import `lib/host.mjs` 验证模型目录容错、`committedSelection` 与 `createSwitcher`，
   `index.test.mjs` **真正加载 `index.js`** 并驱动两条事件路径（含"approved:false 不切"、
-  "subagent 不挂"、"开关关闭两条都不动"），
+  "subagent 不挂"、"开关关闭两条都不动"、"任何事件都不会自动切到自定义模式"），
   `client.test.mjs` 对 `client.js` 做静态回归断言（`<select>`、`selectModel`、镜像哨兵），
   `client-view.test.mjs` 从 `client.js` 里抽出 `#region plan-act-view` 那块镜像实现，用
-  输入矩阵与 `lib/routing.mjs` 的 `resolveTarget`/`sessionTrack` 逐项比对，并断言选项文字是 `模式：模型`，
+  输入矩阵与 `lib/routing.mjs` 的 `resolveTarget`/`sessionTrack`/`customTracks` 逐项比对，
+  并断言选项文字是 `模式：模型`，
   `client-bundle.test.mjs` **真的执行 bundle**：伪造 `window.__ModuleLoader__` 与
   `configForms`/`slots`/`remote` 三个 Service，调用 factory 拿到 module 再跑 `apply()`，
   断言注册的 settings 页 id 与传进 `configForms.get()` 的 namespace 都等于 patch 的 `id`，
-  **并带一个最小 hooks 渲染器真的把下拉框渲染出来**（选项文字与顺序、`modelSelection` 决定选中项、
-  `自定义` 占位、onChange 的 payload、pending 禁用、四种降级、失败小字、开关关闭仍可选），
+  **并带一个最小 hooks 渲染器真的把下拉框和设置页渲染出来**（选项文字与顺序、`modelSelection`
+  决定选中项、`自定义` 占位、自定义模式的增删/命名/上限/保存 payload、onChange 的 payload、
+  pending 禁用、四种降级、失败小字、开关关闭仍可选、项目覆盖编辑器已隐藏），
   `schema.test.mjs` 校验 schemastery 解析（含「旧副本缺 `.volatile()` 必须被拒绝」）。
   `commit.test.mjs` 校验提交信息格式。
 - `client.js` 无法 import `lib/routing.mjs`（它是发给页面的 classic script），所以路由判定在
@@ -219,7 +262,8 @@ npm test
 - `lib/host.mjs` 把「枚举模型目录」与「用宿主的 selectModel 提交选择」从 `index.js` 拆了出来，
   便于无宿主测试。
 - `lib/routing.mjs` 是纯逻辑（不依赖宿主）：`resolveTarget` 解析一项，`sessionTrack` 判断
-  选择落在哪一项，`switchPlan`/`switchActOnApproval` 回答"这次事件该不该切"。
+  选择落在哪一项，`switchPlan`/`switchActOnApproval` 回答"这次事件该不该切"，
+  `tracksOf`/`customTracks`/`customName` 把自定义模式纳入同一张决策表。
 - `tools/read-header.mjs` 从 `session.v4.jsonl.zstd` 里解出每次 `request/header` 与 `plan/mode`，
   用来确认「Plan 模式下真的走了 Plan 路由」：
   ```powershell
