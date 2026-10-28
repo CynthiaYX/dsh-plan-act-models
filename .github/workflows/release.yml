@@ -7,8 +7,12 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# `id-token: write` is what Trusted Publishing needs: npm exchanges the job's
+# OIDC token for a short-lived publish credential, so no long-lived npm token is
+# stored in the repository. `contents: write` is for the Release assets.
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
@@ -41,6 +45,18 @@ jobs:
       # under that name in the same Release.
       - name: Stable asset name
         run: cp dsh-plan-act-models-*.tgz dsh-plan-act-models.tgz
+
+      # Publishing the tarball that was just packed — not the working tree — is
+      # what makes the npm download and the Release asset the same bytes. The
+      # npm copy also carries `repository.url`, which is how awesome-dsh-plugin
+      # binds the catalog entry to its npm package; without it the plugin stays
+      # invisible to the Discover index.
+      - name: Publish to npm
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          npm install --global npm@latest
+          npm --version
+          npm publish "dsh-plan-act-models-${GITHUB_REF_NAME#v}.tgz"
 
       - name: Upload assets
         if: startsWith(github.ref, 'refs/tags/v')
