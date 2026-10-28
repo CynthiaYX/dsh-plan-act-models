@@ -5,8 +5,8 @@
 它不改宿主代码、不存 API Key。
 
 安装包：`dsh-plan-act-models-0.5.0.tgz`（`npm pack` 产物）。别人给你的就是这个 tarball；
-也可以直接从 GitHub Release 取（本仓库每次打 `v*` tag 都会挂上同名的 tgz 与稳定名
-`dsh-plan-act-models.tgz`），命令里把路径或 URL 换成你手里的那份即可。
+也可以从 npm 装（`dsh-plan-act-models`），或直接从 GitHub Release 取（本仓库每次打 `v*` tag
+都会挂上同名的 tgz 与稳定名 `dsh-plan-act-models.tgz`），命令里把路径或 URL 换成你手里的那份即可。
 
 ## 装前确认
 
@@ -14,7 +14,7 @@
 | --- | --- |
 | DSH | 与本包开发时同一大版本（`@deepseek-ai/dsh@0.2.1-rc.3` 或兼容版本） |
 | Profile | 桌面版用应用自带的 `desktop` profile；CLI/Web 用你自己起的普通 profile |
-| 网络 | 装本地 tarball 时不需要；从 GitHub / npm 装时需要能访问对应站点 |
+| 网络 | 装本地 tarball 时不需要；从 npm / GitHub 装时需要能访问 registry.npmjs.org 或 github.com |
 
 ## 路线 A：桌面版（推荐）
 
@@ -31,6 +31,8 @@
 在装 DSH 的机器上执行（`<profile>` 换成你的 profile 名）：
 
 ```powershell
+# 从 npm 装（推荐；预构建安装，不触发 allowBuilds 构建授权）
+dsh plugin --profile <profile> add dsh-plan-act-models
 # 本地 tarball
 dsh plugin --profile <profile> add "C:\路径\dsh-plan-act-models-0.5.0.tgz"
 # 或：直接装最新 Release 附件 / 锁到某个 tag 的源码

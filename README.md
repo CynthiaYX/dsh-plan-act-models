@@ -28,6 +28,14 @@
   `managed exclusively by the Electron application`。
 - **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.5.0.tgz"`，
   Launcher 会自动把 bundle 写进 `dsh.profile.bundles`，然后重启。
+- **从 npm 装**（最省事，别人只需包名）：已发布到 npm，预构建安装不会触发
+  `allowBuilds` 的构建授权流程——
+
+  ```powershell
+  dsh plugin --profile <profile> add dsh-plan-act-models
+  # 锁定版本
+  dsh plugin --profile <profile> add dsh-plan-act-models@0.5.0
+  ```
 - **直接从本仓库装**（不需要本地有 tarball）：装最新 Release 附件，或按 git 引用装源码——
 
   ```powershell
@@ -36,8 +44,8 @@
   dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.5.0"
   ```
 
-  两者都指向同一套文件；Release 附件是 `npm pack` 产物，`github:` 走整仓 tarball，
-  仓库根就是包根，没有需要裁剪的子目录。
+  三者都指向同一套文件；npm 包与 Release 附件是同一份 `npm pack` 产物（`v0.5.0` 的
+  sha1 都是 `dc9225bd`），`github:` 走整仓 tarball，仓库根就是包根，没有需要裁剪的子目录。
 
   > 当前最新 Release：**v0.5.0**（附件 `dsh-plan-act-models.tgz` 与
   > `dsh-plan-act-models-0.5.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
@@ -63,8 +71,9 @@
 ### 发布流程
 
 仓库 `CynthiaYX/dsh-plan-act-models` 就是分发仓库：**仓库根 = npm 包根**，tag 触发发布，
-Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh-plan-act-models.tgz`
-（后者让 `releases/latest/download/dsh-plan-act-models.tgz` 这种"永远最新"的安装/更新地址可用）。
+打 tag 后 CI 同时做两件事：往 npm 上传该版本、把两个 tgz 挂到 Release 上
+（版本名 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh-plan-act-models.tgz`，
+后者让 `releases/latest/download/dsh-plan-act-models.tgz` 这种"永远最新"的安装/更新地址可用）。
 
 1. 改 `package.json` 的 `version`，提交并推送。
 2. 打 tag 并推送（**注意**：Windows PowerShell 5.1 不支持 `&&`，要用 `;` 或分成两行）：
@@ -75,20 +84,29 @@ Release 附件同时提供 `dsh-plan-act-models-<version>.tgz` 与稳定名 `dsh
    ```
 
 3. `.github/workflows/release.yml` 会先校验 tag 与 `package.json` 一致，再 `npm test`、`npm pack`，
-   最后把两个 tgz 挂到该 tag 的 Release 上。
-4. 装/更新的人用 **设置 → 插件** 或 `dsh plugin add <Release 附件地址>` 即可，不需要本地构建。
+   然后把**刚打出来的那个 tarball**发给 npm，最后把两个 tgz 挂到该 tag 的 Release 上。
+   先发 npm 再建 Release：发布失败就不会留下"有 Release 没 npm 包"的半成品。
+4. 装/更新的人用 **设置 → 插件**、`dsh plugin add dsh-plan-act-models`，或
+   `dsh plugin add <Release 附件地址>` 即可，不需要本地构建。
+
+npm 侧用的是 **Trusted Publishing（OIDC）**，仓库里不存任何 npm 令牌：工作流的
+`id-token: write` 权限让 npm 用 job 的 OIDC 身份换取一次性发布凭据。首次启用需要在
+npmjs.com 上给 `dsh-plan-act-models` 配一次 Trusted Publisher（owner `CynthiaYX`、
+repository `dsh-plan-act-models`、workflow `release.yml`）。
 
 ### 上传前清单
 
-本包**尚未发布到 npm**，GitHub Release 才是当前的发布通道。发布前依次确认：
+已发布到 npm（`dsh-plan-act-models`，`latest` = 0.5.0）。发布前依次确认：
 
 1. `node --test` 全绿（176 个用例）。
 2. `npm pack --dry-run` 的文件列表里没有 `lib/*.js`（该 glob 曾指向不存在的文件）。
-3. `package.json` 无 `private`，`license` 与 `repository` 齐全。
+3. `package.json` 无 `private`，`license` 与 `repository` 齐全。**`repository.url` 必须在**：
+   awesome-dsh-plugin 用 `scripts/probe-npm.mjs` 把 catalog 条目绑到 npm 包上，认的就是
+   这条字段与 GitHub 仓库的匹配；缺了它，包能发出去但永远进不了官方 Discover 索引。
 4. `cordis.patch.yml` 的 `id` 与 `client.js` 的 `ENTRY` 逐字相同 —— `client.test.mjs`
    做静态比对，`client-bundle.test.mjs` 真的执行 `apply()` 并断言传进
    `configForms.get()` 的 namespace 就是 patch 的 `id`。改一处必须改另一处。
-5. 若要同时发 npm，上传后 `npm view dsh-plan-act-models version` 应回显对应版本。
+5. 发布后核对 `npm view dsh-plan-act-models version dist.shasum` 与 `npm pack` 的输出一致。
 
 ## 配置
 
