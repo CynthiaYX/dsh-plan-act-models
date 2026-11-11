@@ -22,6 +22,13 @@
 import { loadSchema } from './lib/schema.mjs'
 import { committedSelection, createCatalog, createSwitcher } from './lib/host.mjs'
 import {
+  PROMPT_ORDER,
+  PROMPT_SECTION,
+  modeInstruction,
+  resolveMode,
+  routeConflicts,
+} from './lib/mode-prompt.mjs'
+import {
   MODE_ACT,
   MODE_PLAN,
   projectKey,
@@ -65,6 +72,14 @@ const ProjectEntry = z.object({
   act: Route.default({}),
 })
 
+/**
+ * Per-track system instructions, keyed by track id (`plan`, `act`, or a custom
+ * mode id) — the same keys `modes` uses. An instruction is contributed to the
+ * system prompt while its track is the one the session sits on, so switching
+ * modes also switches the role the model is asked to play.
+ */
+const Prompts = z.dict(z.string()).default({})
+
 /** Volatile fields are the only ones a settings page may read or write. */
 export const Config = z.object({
   enabled: z.boolean().default(false).volatile(),
@@ -72,6 +87,7 @@ export const Config = z.object({
   act: Route.volatile(),
   modes: z.dict(CustomMode).default({}).volatile(),
   projects: z.dict(ProjectEntry).default({}).volatile(),
+  prompts: Prompts.volatile(),
 })
 
 /** Catalog lookups are cheap but not free; one shared snapshot is enough. */
@@ -90,6 +106,7 @@ function readConfig(config) {
     // a custom mode. No automatic rule ever switches *to* one.
     modes: unref(config?.modes),
     projects: unref(config?.projects),
+    prompts: unref(config?.prompts) ?? {},
   }
 }
 
@@ -118,6 +135,16 @@ export function apply(ctx, config) {
   const attached = new WeakSet()
   /** Strong set so `ctx.effect` teardown can dispose the listeners it mounted. */
   const live = new Set()
+  /**
+   * The track each session last committed a switch *to*.
+   *
+   * The session log records provider/model/effort, never the mode id, so two
+   * tracks sharing one route are indistinguishable from the selection alone.
+   * Remembering our own switches is what keeps the instruction attached to the
+   * mode the user actually chose. A manual pick from the dropdown does not pass
+   * through here; it needs no memory unless the routes collide.
+   */
+  const remembered = new WeakMap()
 
   ctx.inject(['settings'], (child) => {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
@@ -161,6 +188,89 @@ export function apply(ctx, config) {
   }
 
   /**
+   * Which track this session is on, and the instruction that follows from it.
+   *
+   * The plan flag only breaks a tie between tracks that share a route; the
+   * remembered track wins first, because it records a choice the log cannot.
+   */
+  function trackOf(agent) {
+    const session = agent?.session
+    if (session === undefined) return null
+    if (session.header?.origin === 'subagent') return null
+    const cfg = readConfig(config)
+    return resolveMode({
+      config: cfg,
+      path: rootOf(agent),
+      selection: committedSelection(projections, session),
+      planActive: planActiveOf(agent),
+      remembered: remembered.get(session),
+    })
+  }
+
+  /** Whether plan mode is on, whichever of the two signals this Host exposes. */
+  function planActiveOf(agent) {
+    try {
+      const planMode = ctx.get('planMode')
+      const verdict = planMode?.get?.(agent)
+      if (verdict !== undefined) return verdict?.active === true
+    } catch {
+      // Fall through to the projection: a Host without `planMode` still logs.
+    }
+    try {
+      const state = projections()?.stateOf?.(agent?.session, 'plan')
+      return state?.active === true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Contribute the active mode's instruction to the system prompt.
+   *
+   * Registered lazily, through `ctx.inject`, so a profile without the prompt
+   * registry still loads the router. The section renders `''` (and is dropped
+   * from the prompt entirely) whenever the session adds no instruction, which
+   * is the common case.
+   */
+  ctx.inject(['systemPrompt'], (child) => {
+    child.effect(() =>
+      child.systemPrompt.section({
+        name: PROMPT_SECTION,
+        order: PROMPT_ORDER,
+        text: (context) => {
+          const agent = context?.agent
+          if (agent === undefined) return ''
+          const track = trackOf(agent)
+          if (track === null) return ''
+          const { text, truncated } = modeInstruction({ config: readConfig(config), track })
+          if (text === '') return ''
+          // A truncated instruction would otherwise end mid-sentence with no sign
+          // of it, and the user would blame the model for the missing half.
+          return truncated ? `${text}\n\n(Instruction truncated by plan-act-models.)` : text
+        },
+      }),
+    )
+  })
+
+  // Two tracks resolving to one route cannot be told apart from the log, so the
+  // user is entitled to know before wondering why one mode's instruction never
+  // appears. Reported once per activation; the settings page shows it too.
+  try {
+    const cfg = readConfig(config)
+    for (const group of routeConflicts(cfg, '')) {
+      const names = group
+        .map((track) => (track === MODE_PLAN || track === MODE_ACT ? track : `模式 ${track}`))
+        .join('、')
+      ctx.logger?.warn?.(
+        `[plan-act-models] ${names} 的路由完全相同，切换时无法区分；`
+        + '请为它们选择不同的 model 或 reasoningEffort，否则只会套用其中一个模式的提示词。',
+      )
+    }
+  } catch {
+    // A malformed configuration must not stop the plugin from loading.
+  }
+
+  /**
    * The hard rule: an approved plan always carries out on the Act route.
    *
    * Only `exit_plan_mode` returning `approved: true` counts. Falling back to the
@@ -181,6 +291,9 @@ export function apply(ctx, config) {
       })
       reportIncomplete(MODE_ACT, verdict)
       if (verdict.action !== 'select') return
+      // Remember before the switch lands: prompt assembly for the next step may
+      // run before the selection projection settles.
+      remembered.set(agent.session, MODE_ACT)
       schedule(select(agent, verdict.route, idOf(agent)))
     }
   }
@@ -212,6 +325,7 @@ export function apply(ctx, config) {
     })
     reportIncomplete(MODE_PLAN, verdict)
     if (verdict.action !== 'select') return
+    remembered.set(session, MODE_PLAN)
     schedule(select(agent, verdict.route, session.id))
   })
 

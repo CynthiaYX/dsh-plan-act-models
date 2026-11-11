@@ -98,7 +98,7 @@ repository `dsh-plan-act-models`、workflow `release.yml`）。
 
 已发布到 npm（`dsh-plan-act-models`，`latest` = 0.5.0）。发布前依次确认：
 
-1. `node --test` 全绿（176 个用例）。
+1. `node --test` 全绿（224 个用例）。
 2. `npm pack --dry-run` 的文件列表里没有 `lib/*.js`（该 glob 曾指向不存在的文件）。
 3. `package.json` 无 `private`，`license` 与 `repository` 齐全。**`repository.url` 必须在**：
    awesome-dsh-plugin 用 `scripts/probe-npm.mjs` 把 catalog 条目绑到 npm 包上，认的就是
@@ -117,6 +117,7 @@ repository `dsh-plan-act-models`、workflow `release.yml`）。
 | `act` | 下拉框里 `Act` 那一项，同上。 |
 | `modes` | **自定义模式表**：键是稳定 id（页面按 `m1`、`m2`… 生成），值是 `name` + 与上面同样的三项路由。 |
 | `projects` | 按工作区根目录（`session.header.cwd`）的覆盖表：`inherit` / `override` / `off`。 |
+| `prompts` | **每个模式的提示词**：键是轨 id（`plan`、`act` 或自定义模式的 id），值是一段文字。 |
 
 项目覆盖是**完整的一对**，不做半合并；项目设为 `off` 时该项目内所有模式都不可选。
 它只覆盖 Plan / Act 两项 —— 自定义模式是全局的，**不参与项目覆盖**（页面上也暂时不提供这个编辑器，
@@ -143,6 +144,37 @@ modes:
 - 一个条目 provider/model 不全时，它照样出现在菜单里、标成 `未配置` 且不可点 ——
   不静默消失，你能看见自己配错了哪一项。
 - 顺序 = 配置里的书写顺序，永远排在 Plan、Act 之后。
+
+### 每个模式的提示词
+
+`prompts` 给每条轨再配一段文字，键就是轨 id —— `plan`、`act`，或某个自定义模式的 id：
+
+```yaml
+modes:
+  m1:
+    name: 审核
+    provider: cline-pass
+    model: deepseek-v4.1-flash-1017
+    reasoningEffort: low
+
+prompts:
+  m1: 你是一名代码审核员。只报告问题与风险，不要改写代码。
+  plan: 先给方案与取舍，等我批准再动手。
+```
+
+- **切换模式就是切换角色**：当会话所在的轨有提示词时，这段文字会被**隐式**加进系统提示词
+  （section `plan-act-models:mode-instruction`，order 900 —— 在两代宿主上都会排在 plan 策略之后）。
+  它不进对话消息、不显示在气泡里，也不改动会话日志。
+- **怎么判断"当前在哪条轨"**：只看宿主已提交的模型选择（provider/model/effort），和下拉框同一套规则。
+  两条轨路由完全相同时，日志本身分不出来，此时以插件自己最近一次切换到的轨为准；仍然并列就按
+  plan 模式决出 —— 和下拉框的 tie-break 一致。
+- 单条上限 4000 字符（`PROMPT_LIMIT`）：系统提示词是每个请求都要付的预算，超出的部分会被截断，
+  并在 section 末尾写明 `(Instruction truncated by plan-act-models.)`，不会悄悄少半句。
+- 文字里的 `{{` 会被拆成 `{ {`。宿主的提示词渲染器把 `{{name}}` 当变量插值，遇到不认识的变量会
+  **直接抛错**，那会让整个请求失败；拆开后你的花括号照旧可读，只是不再被当作变量。
+- 子代理（`session.header.origin === 'subagent'`）**不带**提示词：它跑在自己的路由上，没有自己的模式，
+  套上父会话的角色只会让作用域悄悄变宽。
+- 设置页给 Plan、Act 和每个自定义模式各留一个输入框；清空即删除该键（空字符串与"没有提示词"等价）。
 
 ## 对话框里的模式下拉框
 
@@ -209,7 +241,9 @@ composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（�
 
 1. **几项配置都不写 `reasoningEffort` 时，下拉框无法区分它们**：provider 与 model 都一样，
    "当前在哪一项"没有可比较的差异，此时按 plan 模式决出显示项（tie-break），内建的 Plan / Act
-   在并列时优先；选另一个同路由的条目效果只是把 effort 改回默认。
+   在并列时优先；选另一个同路由的条目效果只是把 effort 改回默认。**提示词也受这条限制**：
+   两条轨路由完全相同时，宿主只能套用其中一条的提示词（插件最近一次切换到的轨优先）。
+   设置页会在这种配置上直接给出警告，最省事的办法是给它们不同的 `reasoningEffort`。
 2. 手动在原生选择器里换到的模型若恰好等于某一项的 route，会显示成那一项（语义等价，不算错）。
 3. `enabled` 关闭只停自动切换；它不会锁住下拉框，也不会阻止你手选一个和 plan 模式不匹配的模型，
    或手选一个自定义模式。
@@ -236,32 +270,40 @@ composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（�
    就恢复。隐藏期间页面**不会**因为一条手写的、不完整的覆盖而拒绝保存，也不会在保存时抹掉它。
 10. **自定义模式是全局的**：它不参与 `projects` 覆盖，也不会被两条自动规则选中，
     只在你手动点选时生效。
+11. **提示词依赖宿主的 `systemPrompt` 服务**：section 是通过 `ctx.inject(['systemPrompt'])` 注册的，
+    所以没有这个服务的 profile 里插件照常加载、两条自动规则照常工作，只是不注入提示词。
+    另外它是**一条**全局 section（`plan-act-models:mode-instruction`），正文按会话的当前轨实时渲染；
+    这样不必为每个 Agent 各挂一份，但也就不会与别的插件共享同名 section。
 
 ## 开发
 
 ```powershell
-# 在仓库根执行；`npm test` 也会跑同样八个文件
+# 在仓库根执行；`npm test` 也会跑同样九个文件
 npm test
 ```
 
 `$node` 指向安装目录里的 Node（`D:\DeepSeek Harness\resources\runtime\primary-runtime\dependencies\node\bin\node.exe`），
 或直接用系统 `node`（需 ≥ 20，仓库在 Node 24 上验证）。
 
-- 八个用例文件都只依赖 `node:test` 与包内源码，**不需要**运行中的 Host：
+- 九个用例文件都只依赖 `node:test` 与包内源码，**不需要**运行中的 Host：
   `routing.test.mjs` 跑纯决策表（`resolveTarget` 矩阵、`sameTrack`/`sessionTrack`、
   `customTracks`/`customName`/`tracksOf`、两个 switch 的真值表），
   `host.test.mjs` 直接 import `lib/host.mjs` 验证模型目录容错、`committedSelection` 与 `createSwitcher`，
+  `mode-prompt.test.mjs` 只跑 `lib/mode-prompt.mjs`：提示词清洗（花括号拆分、截断）、轨名回退、
+  提示词正文的框架、`resolveMode` 的记忆与 tie-break、以及 `routeConflicts` 的分组，
   `index.test.mjs` **真正加载 `index.js`** 并驱动两条事件路径（含"approved:false 不切"、
-  "subagent 不挂"、"开关关闭两条都不动"、"任何事件都不会自动切到自定义模式"），
+  "subagent 不挂"、"开关关闭两条都不动"、"任何事件都不会自动切到自定义模式"、
+  "systemPrompt 缺席时仍然加载"、"同路由的两条轨只告警一次"），
   `client.test.mjs` 对 `client.js` 做静态回归断言（`<select>`、`selectModel`、镜像哨兵），
   `client-view.test.mjs` 从 `client.js` 里抽出 `#region plan-act-view` 那块镜像实现，用
-  输入矩阵与 `lib/routing.mjs` 的 `resolveTarget`/`sessionTrack`/`customTracks` 逐项比对，
+  输入矩阵与 `lib/routing.mjs` 的 `resolveTarget`/`sessionTrack`/`customTracks`/`routeConflicts` 逐项比对，
   并断言选项文字是 `模式：模型`，
   `client-bundle.test.mjs` **真的执行 bundle**：伪造 `window.__ModuleLoader__` 与
   `configForms`/`slots`/`remote` 三个 Service，调用 factory 拿到 module 再跑 `apply()`，
   断言注册的 settings 页 id 与传进 `configForms.get()` 的 namespace 都等于 patch 的 `id`，
   **并带一个最小 hooks 渲染器真的把下拉框和设置页渲染出来**（选项文字与顺序、`modelSelection`
   决定选中项、`自定义` 占位、自定义模式的增删/命名/上限/保存 payload、onChange 的 payload、
+  每条轨的提示词输入框及其保存/清空、同路由告警、
   pending 禁用、四种降级、失败小字、开关关闭仍可选、项目覆盖编辑器已隐藏），
   `schema.test.mjs` 校验 schemastery 解析（含「旧副本缺 `.volatile()` 必须被拒绝」）。
   `commit.test.mjs` 校验提交信息格式。

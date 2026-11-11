@@ -43,6 +43,13 @@ window.__ModuleLoader__.load({
      */
     const MODE_LIMIT = 12
 
+    /**
+     * Character cap for one mode instruction; must match `PROMPT_LIMIT` in
+     * `lib/mode-prompt.mjs`. The Host truncates beyond it and says so; the box
+     * refuses the extra keystrokes instead, so the two never disagree silently.
+     */
+    const PROMPT_LIMIT = 4000
+
     /** The default name of the `index`-th custom mode; must match `customName`. */
     function defaultModeName(index) {
       return `模式 ${index + 1}`
@@ -74,12 +81,21 @@ window.__ModuleLoader__.load({
       Object.keys(rawModes).forEach((id, index) => {
         modes[id] = modeOf(rawModes[id], index)
       })
+      // Every stored instruction is kept, including one keyed to a track this
+      // page cannot see: dropping it on load would erase it on the next save.
+      const prompts = {}
+      const rawPrompts = source.prompts && typeof source.prompts === 'object' ? source.prompts : {}
+      for (const track of Object.keys(rawPrompts)) {
+        const value = rawPrompts[track]
+        if (typeof value === 'string') prompts[track] = value
+      }
       return {
         enabled: source.enabled === true,
         plan: routeOf(source.plan),
         act: routeOf(source.act),
         modes,
         projects,
+        prompts,
       }
     }
 
@@ -297,6 +313,42 @@ window.__ModuleLoader__.load({
       return named === undefined ? matches[0].id : named.id
     }
 
+    /**
+     * Browser twin of `routeConflicts`: groups of tracks whose routes coincide.
+     *
+     * `mirrorSameTrack` already treats an empty configured effort as "any", so
+     * two tracks that differ only by a blank effort land in one group — which is
+     * exactly what the Host computes, and exactly what the user cannot tell
+     * apart when the dropdown switches between them.
+     */
+    function mirrorConflicts(config, path) {
+      const order = mirrorTracks(config).map((track) => track.id)
+      const entries = order
+        .map((id) => ({ id, resolved: mirrorResolve(config, path, id) }))
+        .filter((entry) => entry.resolved.kind === 'route')
+      const groups = []
+      for (const entry of entries) {
+        const hits = groups.filter((group) =>
+          group.some((other) => mirrorSameTrack(other.resolved.route, entry.resolved.route)),
+        )
+        if (hits.length === 0) {
+          groups.push([entry])
+          continue
+        }
+        const merged = [entry]
+        for (const group of hits) {
+          merged.push(...group)
+          groups.splice(groups.indexOf(group), 1)
+        }
+        groups.push(merged)
+      }
+      return groups
+        .filter((group) => group.length > 1)
+        // Report in dropdown order, as the Host does, so the warning reads the
+        // way the menu does.
+        .map((group) => group.map((item) => item.id).sort((left, right) => order.indexOf(left) - order.indexOf(right)))
+    }
+
     /** Display name of a route's model, falling back to its id. */
     function routeName(catalog, route) {
       const groups = Array.isArray(catalog?.groups) ? catalog.groups : []
@@ -448,6 +500,41 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * The instruction editor: one free-text box per track.
+     *
+     * A plain `<textarea>`, not a rich editor — the text is contributed verbatim
+     * to the system prompt, and showing it as it will be read is the point. The
+     * character cap mirrors the Host's (`PROMPT_LIMIT` in `lib/mode-prompt.mjs`);
+     * the counter appears only near the end so an empty box stays quiet.
+     */
+    function PromptEditor({ title, value, onChange, hint }) {
+      const length = value.length
+      const near = length > PROMPT_LIMIT - 500
+      return React.createElement(
+        'div',
+        { style: { display: 'grid', gap: 6 } },
+        React.createElement('span', { style: { color: muted, fontSize: 12 } }, title),
+        React.createElement('textarea', {
+          style: { ...control, minHeight: 68, resize: 'vertical', lineHeight: 1.5 },
+          value,
+          rows: 3,
+          maxLength: PROMPT_LIMIT,
+          'aria-label': title,
+          placeholder: '例如：你是一名代码审核员，请只报告问题，不要改写代码。',
+          onChange: (event) => onChange(event.target.value),
+        }),
+        React.createElement(
+          'div',
+          { style: { display: 'flex', gap: 8, fontSize: 11, color: muted } },
+          React.createElement('span', null, hint),
+          near || length >= PROMPT_LIMIT
+            ? React.createElement('span', null, `${length}/${PROMPT_LIMIT}`)
+            : null,
+        ),
+      )
+    }
+
     function RouterSection(props) {
       const { form } = props
       const [snapshot, setSnapshot] = useState(() => form?.getSnapshot?.())
@@ -520,6 +607,17 @@ window.__ModuleLoader__.load({
 
       const blocked = draft.enabled && routes.length > 0
 
+      /**
+       * Tracks the dropdown cannot tell apart, because they resolve to the same
+       * provider/model/effort. The Host reports these once at activation; showing
+       * them here is where the user can actually fix it.
+       */
+      const conflicts = useMemo(() => mirrorConflicts(draft, ''), [draft.plan, draft.act, draft.modes])
+      const trackNameOf = useCallback(
+        (id) => mirrorTracks(draft).find((track) => track.id === id)?.name ?? id,
+        [draft.modes, draft.plan, draft.act],
+      )
+
       const save = useCallback(async () => {
         if (!form?.mutate) return
         if (blocked) {
@@ -552,6 +650,15 @@ window.__ModuleLoader__.load({
                 act: toPayload(entry.act),
               },
             ]),
+          ),
+          // Only instructions with content: a blank box means "no instruction",
+          // which is the same as no key at all. Keys this page cannot show are
+          // kept as-is — a hand-written entry must survive a save, the same rule
+          // the project table follows.
+          prompts: Object.fromEntries(
+            Object.entries(draft.prompts)
+              .filter(([, value]) => typeof value === 'string' && value.trim() !== '')
+              .map(([track, value]) => [track, value.trim()]),
           ),
         }
         const ok = await form.mutate(
@@ -619,7 +726,11 @@ window.__ModuleLoader__.load({
       function removeMode(id) {
         const next = { ...draft.modes }
         delete next[id]
-        setDraft({ ...draft, modes: next })
+        // The instruction is keyed by the mode id, so dropping the mode without
+        // its text would leave an orphan that the next save writes back.
+        const prompts = { ...draft.prompts }
+        delete prompts[id]
+        setDraft({ ...draft, modes: next, prompts })
       }
 
       function patchMode(id, patch) {
@@ -627,6 +738,14 @@ window.__ModuleLoader__.load({
           ...draft,
           modes: { ...draft.modes, [id]: { ...draft.modes[id], ...patch } },
         })
+      }
+
+      /** Set (or clear) the instruction attached to one track. */
+      function patchPrompt(track, value) {
+        const prompts = { ...draft.prompts }
+        if (value === '') delete prompts[track]
+        else prompts[track] = value
+        setDraft({ ...draft, prompts })
       }
 
       const modeCards = modeEntries.map(([id, entry]) =>
@@ -662,6 +781,12 @@ window.__ModuleLoader__.load({
             route: entry,
             onChange: (route) => patchMode(id, route),
           }),
+          React.createElement(PromptEditor, {
+            title: `提示词（${entry.name}）`,
+            value: draft.prompts[id] ?? '',
+            hint: `选到「${entry.name}」时，这段文字会加进系统提示词。`,
+            onChange: (value) => patchPrompt(id, value),
+          }),
         ),
       )
 
@@ -677,6 +802,12 @@ window.__ModuleLoader__.load({
             { style: { margin: 0, color: muted, fontSize: 12 } },
             'Plan / Act 与自定义模式共用同一个「模式下拉框」。手动选择随时生效；',
             '下面的开关只控制自动切换：进入 Plan 模式时自动选 Plan，批准计划后强制选 Act。',
+          ),
+          React.createElement(
+            'p',
+            { style: { margin: 0, color: muted, fontSize: 12 } },
+            '每个模式都可以附一段「提示词」：选到该模式时，这段文字会隐式加入系统提示词，',
+            '不占用对话消息，也不会显示在聊天气泡里。',
           ),
         ),
         React.createElement(
@@ -702,6 +833,12 @@ window.__ModuleLoader__.load({
           disabled: false,
           onChange: (route) => setDraft({ ...draft, plan: route }),
         }),
+        React.createElement(PromptEditor, {
+          title: 'Plan 提示词',
+          value: draft.prompts.plan ?? '',
+          hint: '只在 Plan 模式生效，例如先调研再动手的要求。',
+          onChange: (value) => patchPrompt('plan', value),
+        }),
         React.createElement(RouteEditor, {
           title: 'Act 模式',
           catalog,
@@ -709,6 +846,26 @@ window.__ModuleLoader__.load({
           disabled: false,
           onChange: (route) => setDraft({ ...draft, act: route }),
         }),
+        React.createElement(PromptEditor, {
+          title: 'Act 提示词',
+          value: draft.prompts.act ?? '',
+          hint: '只在 Act 模式生效，例如执行阶段的行为约束。',
+          onChange: (value) => patchPrompt('act', value),
+        }),
+        conflicts.length === 0
+          ? null
+          : React.createElement(
+              'div',
+              { style: { color: danger, fontSize: 12, display: 'grid', gap: 2 } },
+              React.createElement('strong', null, '以下模式的模型与思考等级完全相同'),
+              React.createElement(
+                'span',
+                null,
+                `${conflicts.map((group) => group.map(trackNameOf).join('、')).join('；')}`,
+                ' —— 切换时宿主无法区分，只会套用其中一个模式的提示词；',
+                '请给它们不同的 model 或思考等级。',
+              ),
+            ),
         React.createElement(
           'div',
           { style: { display: 'grid', gap: 8 }, 'data-section': 'custom-modes' },

@@ -43,7 +43,7 @@
   ],
   "dependencies": {},
   "scripts": {
-    "test": "node --test test/routing.test.mjs test/host.test.mjs test/index.test.mjs test/client.test.mjs test/client-bundle.test.mjs test/client-view.test.mjs test/schema.test.mjs test/commit.test.mjs"
+    "test": "node --test test/routing.test.mjs test/host.test.mjs test/mode-prompt.test.mjs test/index.test.mjs test/client.test.mjs test/client-bundle.test.mjs test/client-view.test.mjs test/schema.test.mjs test/commit.test.mjs"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",

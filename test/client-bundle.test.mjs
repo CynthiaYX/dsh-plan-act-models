@@ -454,6 +454,30 @@ function inputsOf(element) {
   return found
 }
 
+/** Every `textarea` in a rendered tree, i.e. one instruction box per track. */
+function textareasOf(element) {
+  const found = []
+  const walk = (node) => {
+    if (node === null || node === undefined || node === false) return
+    if (Array.isArray(node)) {
+      node.forEach(walk)
+      return
+    }
+    if (typeof node !== 'object') return
+    // `PromptEditor` is a function component, so its `<textarea>` sits behind a
+    // node whose `type` is a function. Expand it the way `textOf` does, or the
+    // box would be invisible to this collector while still rendering.
+    if (typeof node.type === 'function') {
+      walk(node.type({ ...node.props, children: node.children }))
+      return
+    }
+    if (node.type === 'textarea') found.push(node)
+    ;(node.children ?? []).forEach(walk)
+  }
+  walk(element)
+  return found
+}
+
 /** Find the one button whose text is `label` and press it. */
 function clickButton(element, label) {
   const found = []
@@ -1223,3 +1247,102 @@ test('a hand-written project override neither blocks nor is erased by a save', a
   // silently erasing configuration that was written by hand.
   assert.deepEqual(savedValue(settings.writes).projects, override)
 })
+
+// --- the settings page's instruction boxes -------------------------------
+
+/** The instruction box whose `aria-label` is `label`. */
+function promptBoxOf(element, label) {
+  const found = textareasOf(element).filter((area) => area.props['aria-label'] === label)
+  assert.equal(found.length, 1, `expected exactly one box labelled ${label}`)
+  return found[0]
+}
+
+test('every track gets its own instruction box, holding what is stored', async () => {
+  const settings = await settingsOf({
+    ...ROUTE_PAIR,
+    modes: { m1: { name: '审查', ...MODE_ROUTE } },
+    prompts: { plan: '先给方案。', m1: '只报告问题。' },
+  })
+
+  assert.equal(promptBoxOf(settings.element, 'Plan 提示词').props.value, '先给方案。')
+  // A track with no stored instruction still gets a box, so the user can add one.
+  assert.equal(promptBoxOf(settings.element, 'Act 提示词').props.value, '')
+  assert.equal(promptBoxOf(settings.element, '提示词（审查）').props.value, '只报告问题。')
+})
+
+test('an instruction box refuses more than the cap the Host enforces', async () => {
+  const settings = await settingsOf(ROUTE_PAIR)
+  const box = promptBoxOf(settings.element, 'Plan 提示词')
+  // `maxLength` keeps the page and the Host from disagreeing silently: the Host
+  // truncates at 4000 and says so, the box stops the keystrokes instead.
+  assert.equal(box.props.maxLength, 4000)
+})
+
+test('an instruction is saved trimmed, under the track it belongs to', async () => {
+  const settings = await settingsOf({ ...ROUTE_PAIR, modes: { m1: { name: '审查', ...MODE_ROUTE } } })
+
+  promptBoxOf(settings.element, '提示词（审查）').props.onChange({ target: { value: '  只报告问题。  ' } })
+  await settings.rerender()
+  clickButton(settings.element, '保存')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.deepEqual(savedValue(settings.writes).prompts, { m1: '只报告问题。' })
+})
+
+test('clearing a box drops the key instead of storing an empty instruction', async () => {
+  const settings = await settingsOf({ ...ROUTE_PAIR, prompts: { plan: '先给方案。', act: '直接改。' } })
+
+  promptBoxOf(settings.element, 'Plan 提示词').props.onChange({ target: { value: '   ' } })
+  await settings.rerender()
+  clickButton(settings.element, '保存')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  // An empty string and a missing key mean the same thing to the Host; storing
+  // the empty one would make the field grow every time a box is emptied.
+  assert.deepEqual(savedValue(settings.writes).prompts, { act: '直接改。' })
+})
+
+test('an instruction keyed to a track this page cannot show is preserved', async () => {
+  const settings = await settingsOf({ ...ROUTE_PAIR, prompts: { ghost: '手写的' } })
+
+  clickButton(settings.element, '保存')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.deepEqual(savedValue(settings.writes).prompts, { ghost: '手写的' })
+})
+
+test('removing a mode removes its instruction too', async () => {
+  const settings = await settingsOf({
+    ...ROUTE_PAIR,
+    modes: { m1: { name: '审查', ...MODE_ROUTE }, m2: { name: '写文档', ...MODE_ROUTE } },
+    prompts: { m1: '只报告问题。', m2: '写成文档。' },
+  })
+
+  clickButton(modeCardsOf(settings.element)[0], '移除')
+  await settings.rerender()
+  clickButton(settings.element, '保存')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  // The instruction is keyed by the mode id: dropping the mode without its text
+  // would leave an orphan the next save writes straight back.
+  assert.deepEqual(savedValue(settings.writes).prompts, { m2: '写成文档。' })
+})
+
+test('the page warns when two modes cannot be told apart', async () => {
+  // `m1` resolves to the same provider/model/effort as Plan, so the Host cannot
+  // know which instruction to attach; saying so is friendlier than letting the
+  // user wonder why one of them never applies.
+  const settings = await settingsOf({
+    ...ROUTE_PAIR,
+    modes: { m1: { name: '审查', ...ROUTE_PAIR.plan } },
+  })
+
+  assert.match(settings.text, /以下模式的模型与思考等级完全相同/)
+  assert.match(settings.text, /Plan、审查/)
+})
+
+test('distinct routes are never flagged', async () => {
+  const settings = await settingsOf({ ...ROUTE_PAIR, modes: { m1: { name: '审查', ...MODE_ROUTE } } })
+  assert.doesNotMatch(settings.text, /以下模式的模型与思考等级完全相同/)
+})
+

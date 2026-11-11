@@ -70,6 +70,7 @@ test('the resolved namespace builds the schema shapes index.js declares', async 
     act: Route.volatile(),
     modes: z.dict(CustomMode).default({}).volatile(),
     projects: z.dict(ProjectEntry).default({}).volatile(),
+    prompts: z.dict(z.string()).default({}).volatile(),
   })
 
   const config = Config({})
@@ -77,6 +78,14 @@ test('the resolved namespace builds the schema shapes index.js declares', async 
   assert.deepEqual(config.plan.get(), { provider: '', model: '', reasoningEffort: '' })
   assert.deepEqual(config.projects.get(), {})
   assert.deepEqual(config.modes.get(), {})
+  // Instructions are keyed by track id, so a string table is the whole shape.
+  assert.deepEqual(config.prompts.get(), {})
+
+  // A stored instruction survives validation verbatim; the Host sanitizes on
+  // the way into the prompt, not here, so the user's text is never rewritten
+  // in the configuration they can see and edit.
+  const withPrompt = Config({ prompts: { plan: '先调研再动手', m1: '只报告问题' } })
+  assert.deepEqual(withPrompt.prompts.get(), { plan: '先调研再动手', m1: '只报告问题' })
 
   // A custom mode fills in every field the two built-in tracks have, so the
   // settings page can bind the same editor to it.

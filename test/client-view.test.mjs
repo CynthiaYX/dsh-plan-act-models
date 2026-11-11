@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 import { resolveTarget, sessionTrack, customName, customTracks } from '../lib/routing.mjs'
+import { routeConflicts } from '../lib/mode-prompt.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
@@ -50,6 +51,7 @@ function loadMirror() {
        mirrorModeName,
        mirrorCustomTracks,
        mirrorTracks,
+      mirrorConflicts,
        routeLabel,
        routeDetail,
        routeTitle,
@@ -457,4 +459,48 @@ test('the hover title carries the exact route plus where it came from', () => {
 test('the placeholder title spells the ids out', () => {
   assert.match(mirror.customTitle({ provider: 'p', model: 'm', reasoningEffort: 'low' }), /^自定义 — p\/m \(low\)$/)
   assert.match(mirror.customTitle(null), /^自定义 — 当前会话还没有选定模型$/)
+})
+
+test('the mirrored collision report matches lib/mode-prompt.mjs', () => {
+  // The settings page warns the user with this list, and the Host warns in the
+  // log with its own. A disagreement would either nag about a configuration the
+  // Host considers fine or stay silent about one it cannot tell apart.
+  const configs = [
+    pair(),
+    {},
+    undefined,
+    // Plan and Act differ only by effort, so they are distinguishable.
+    { plan: { provider: 'p', model: 'm' }, act: { provider: 'p', model: 'm' } },
+    // A custom mode aliased to a built-in.
+    { ...pair(), modes: { m1: { name: '也是 Plan', provider: 'p', model: 'm', reasoningEffort: 'max' } } },
+    // Two custom modes aliased to each other, on a route no built-in owns.
+    {
+      ...pair(),
+      modes: { m1: { name: '甲', provider: 'q', model: 'n' }, m2: { name: '乙', provider: 'q', model: 'n' } },
+    },
+    // A blank effort follows the model default, so it collides with any effort.
+    { ...pair(), modes: { m1: { name: '任意', provider: 'p', model: 'm' } } },
+    // Incomplete modes never join a group.
+    { ...pair(), modes: { m1: { name: '待补', provider: 'q', model: '' } } },
+    // A project override can create a collision the global pair does not have.
+    { ...pair(), projects: { 'd:/repo': { mode: 'override', plan: override().plan, act: override().act } } },
+    { ...pair(), projects: { 'd:/repo': { mode: 'off' } } },
+  ]
+  const paths = ['', 'C:/work', 'd:/repo', 'd:/repo/']
+  for (const config of configs) {
+    for (const path of paths) {
+      assert.deepEqual(
+        mirror.mirrorConflicts(config, path),
+        routeConflicts(config, path),
+        `mirror diverged from routeConflicts for ${JSON.stringify(config)} at ${path}`,
+      )
+    }
+  }
+})
+
+test('the mirrored collision report names tracks in menu order', () => {
+  // Both sides sort by dropdown position rather than by the order the groups
+  // happened to merge in, so the warning reads the way the menu does.
+  const config = { ...pair(), modes: { m1: { name: '也是 Plan', provider: 'p', model: 'm', reasoningEffort: 'max' } } }
+  assert.deepEqual(mirror.mirrorConflicts(config, ''), [['plan', 'm1']])
 })

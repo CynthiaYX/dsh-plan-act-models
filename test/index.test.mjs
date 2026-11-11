@@ -159,7 +159,22 @@ function harness(overrides = {}) {
       events[name] = fn
       return () => {}
     },
-    inject: () => {},
+    // The Host runs the callback only when every named service exists, and the
+    // child context carries those services as properties (`child.systemPrompt`).
+    // Mirror both, so a profile without `systemPrompt` is genuinely exercised.
+    inject: (names, fn) => {
+      if (!names.every((name) => services[name] !== undefined)) return undefined
+      const child = {
+        ...ctx,
+        ...services,
+        effect: (register) => {
+          const dispose = register()
+          if (typeof dispose === 'function') events[`dispose:${names.join(',')}`] = dispose
+          return dispose
+        },
+      }
+      return fn(child)
+    },
     effect: (fn) => {
       events.teardown = fn()
     },
@@ -177,6 +192,7 @@ function harness(overrides = {}) {
     act: { get: () => overrides.act ?? ACT_ROUTE },
     modes: { get: () => overrides.modes ?? {} },
     projects: { get: () => overrides.projects ?? {} },
+    prompts: { get: () => overrides.prompts ?? {} },
   }
 
   // `select` is async; every assertion below drains the microtask queue first.
@@ -208,6 +224,25 @@ function approvalEvent(agent, value, { name = 'exit_plan_mode', isError = false 
 /** The `plan/mode` event a session commits when plan mode flips. */
 function planMode(session, active) {
   return { type: 'plan/mode', data: { active } }
+}
+
+/**
+ * A `systemPrompt` stub that records what the plugin registered.
+ *
+ * The Host's real registry merges layers and renders text lazily, but the only
+ * thing this plugin does with it is hand over one section whose `text` is a
+ * function of the assembly context — so recording the registration and calling
+ * that function is enough to see exactly what would be added to a prompt.
+ */
+function promptService() {
+  const sections = []
+  return {
+    sections,
+    section: (section) => {
+      sections.push(section)
+      return () => {}
+    },
+  }
 }
 
 test('apply attaches exactly one tools/result listener per Agent', () => {
@@ -537,3 +572,172 @@ test('a missing sessionController degrades without breaking the event', async ()
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /sessionController/)
 })
+
+// --- the mode instruction in the system prompt ----------------------------
+
+/** The text the plugin contributes for `agent`, from its registered section. */
+function instructionFor(sections, agent) {
+  assert.equal(sections.length, 1, 'exactly one prompt section must be registered')
+  return sections[0].text({ agent, scope: agent })
+}
+
+test('the prompt section is registered under the plugin prefix, before tools', () => {
+  const systemPrompt = promptService()
+  harness({ services: { systemPrompt } })
+
+  const [section] = systemPrompt.sections
+  assert.ok(section, 'the section must be registered at activation')
+  assert.equal(section.name, 'plan-act-models:mode-instruction')
+  assert.equal(section.order, 900)
+  assert.equal(typeof section.text, 'function', 'the text must be evaluated per assembly')
+})
+
+test('the instruction follows the committed selection', () => {
+  const agent = newAgent('root-1')
+  const systemPrompt = promptService()
+  harness({
+    roots: [agent],
+    selection: PLAN_ROUTE,
+    prompts: { plan: '先给方案，再动手。', act: '直接改代码。' },
+    services: { systemPrompt },
+  })
+
+  assert.equal(
+    instructionFor(systemPrompt.sections, agent),
+    'Mode "Plan" is active for this session. Apply its instruction, which follows, to every response.\n\n先给方案，再动手。',
+  )
+})
+
+test('a custom mode contributes its own instruction', () => {
+  const agent = newAgent('root-1')
+  const systemPrompt = promptService()
+  const custom = { provider: 'local', model: 'reviewer', reasoningEffort: 'low' }
+  harness({
+    roots: [agent],
+    selection: custom,
+    modes: { m1: { name: '审查', ...custom } },
+    prompts: { plan: '先给方案。', m1: '你是一名代码审核员，只报告问题。' },
+    services: { systemPrompt },
+  })
+
+  assert.match(instructionFor(systemPrompt.sections, agent), /^Mode "审查" is active[^\n]*\n\n你是一名代码审核员，只报告问题。$/)
+})
+
+test('the text is recomputed from the live selection, not frozen at activation', () => {
+  const agent = newAgent('root-1')
+  const systemPrompt = promptService()
+  // A selection the test can move, the way a real commit would.
+  let committed = PLAN_ROUTE
+  harness({
+    roots: [agent],
+    prompts: { plan: 'PLAN TEXT', act: 'ACT TEXT' },
+    services: {
+      systemPrompt,
+      sessionProjections: {
+        stateOf: (_session, key) =>
+          key === 'modelSelection' && committed !== null ? { pending: committed, lastUsed: null } : undefined,
+      },
+    },
+  })
+
+  assert.match(instructionFor(systemPrompt.sections, agent), /PLAN TEXT$/)
+  committed = ACT_ROUTE
+  assert.match(instructionFor(systemPrompt.sections, agent), /ACT TEXT$/)
+})
+
+test('a track with no instruction, or no track at all, contributes nothing', () => {
+  const agent = newAgent('root-1')
+  const systemPrompt = promptService()
+  harness({
+    roots: [agent],
+    selection: PLAN_ROUTE,
+    prompts: { act: '只在 Act 生效。' },
+    services: { systemPrompt },
+  })
+
+  assert.equal(instructionFor(systemPrompt.sections, agent), '')
+  // An assembly with no Agent (the Host does this for deployment-wide text)
+  // must not throw either.
+  assert.equal(systemPrompt.sections[0].text({}), '')
+})
+
+test('a selection matching no track contributes nothing', () => {
+  const agent = newAgent('root-1')
+  const systemPrompt = promptService()
+  harness({
+    roots: [agent],
+    selection: { provider: 'other', model: 'stray', reasoningEffort: 'low' },
+    prompts: { plan: 'PLAN TEXT', act: 'ACT TEXT' },
+    services: { systemPrompt },
+  })
+
+  assert.equal(instructionFor(systemPrompt.sections, agent), '')
+})
+
+test('a subagent session never inherits the parent mode instruction', () => {
+  // A subagent runs on its own route and has no mode of its own; attaching the
+  // parent's role to it would be a silent scope leak.
+  const subagent = newAgent('sub', { origin: 'subagent' })
+  const systemPrompt = promptService()
+  harness({
+    roots: [subagent],
+    selection: PLAN_ROUTE,
+    prompts: { plan: 'PLAN TEXT' },
+    services: { systemPrompt },
+  })
+
+  assert.equal(instructionFor(systemPrompt.sections, subagent), '')
+})
+
+test('a truncated instruction says so instead of ending mid-sentence', () => {
+  const agent = newAgent('root-1')
+  const systemPrompt = promptService()
+  harness({
+    roots: [agent],
+    selection: PLAN_ROUTE,
+    prompts: { plan: 'x'.repeat(4001) },
+    services: { systemPrompt },
+  })
+
+  const text = instructionFor(systemPrompt.sections, agent)
+  assert.ok(text.endsWith('(Instruction truncated by plan-act-models.)'))
+  // The body is capped, so the suffix is the only thing past the limit.
+  assert.equal(text.split('\n\n')[1].length, 4000)
+})
+
+test('a profile without the prompt registry still loads the router', () => {
+  // `systemPrompt` is optional: the section is registered through `inject`, so
+  // its absence must not stop the two automatic rules from existing.
+  const agent = newAgent('root-1')
+  const { events, calls } = harness({ roots: [agent], prompts: { plan: 'PLAN' } })
+
+  assert.equal(typeof events['session/event'], 'function')
+  assert.deepEqual(agent.listeners.map((item) => item.name), ['tools/result'])
+  assert.deepEqual(calls, [])
+})
+
+test('registering the section is disposed with the activation', () => {
+  const systemPrompt = promptService()
+  const { events } = harness({ services: { systemPrompt } })
+  assert.equal(typeof events['dispose:systemPrompt'], 'function')
+})
+
+// --- collisions the dropdown cannot express -------------------------------
+
+test('two tracks sharing a route are reported once at activation', () => {
+  const systemPrompt = promptService()
+  const { warnings } = harness({
+    modes: { m1: { name: '审查', ...PLAN_ROUTE } },
+    services: { systemPrompt },
+  })
+
+  assert.equal(warnings.length, 1, 'one warning names the whole group')
+  assert.match(warnings[0], /路由完全相同/)
+  assert.match(warnings[0], /plan、模式 m1/)
+})
+
+test('distinct routes are quiet', () => {
+  const { warnings } = harness({ modes: { m1: { name: '审查', provider: 'local', model: 'reviewer' } } })
+  assert.deepEqual(warnings, [])
+})
+

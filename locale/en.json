@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Modes and models",
-    "description": "Plan, Act and any custom mode each use their own model and reasoning effort; automatic switching only happens around Plan, and custom modes are picked by hand."
+    "description": "Plan, Act and any custom mode each use their own model, reasoning effort and optional instruction, which joins the system prompt while that mode is active. Automatic switching only happens around Plan, and custom modes are picked by hand."
   }
 }
