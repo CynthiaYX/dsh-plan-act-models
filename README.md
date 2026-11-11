@@ -20,13 +20,13 @@
 
 ## 安装
 
-分发包是 `dsh-plan-act-models-0.5.0.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
+分发包是 `dsh-plan-act-models-0.6.0.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
 完整步骤、验证清单与排错见 **[INSTALL.md](./INSTALL.md)**，安装路线摘录：
 
 - **桌面版**：应用内 **设置 → 插件 → 从本地文件安装** 选 tarball，然后重启应用。
   桌面 profile 由应用独占管理，外部 `dsh --profile desktop …` 会报
   `managed exclusively by the Electron application`。
-- **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.5.0.tgz"`，
+- **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.6.0.tgz"`，
   Launcher 会自动把 bundle 写进 `dsh.profile.bundles`，然后重启。
 - **从 npm 装**（最省事，别人只需包名）：已发布到 npm，预构建安装不会触发
   `allowBuilds` 的构建授权流程——
@@ -34,21 +34,22 @@
   ```powershell
   dsh plugin --profile <profile> add dsh-plan-act-models
   # 锁定版本
-  dsh plugin --profile <profile> add dsh-plan-act-models@0.5.0
+  dsh plugin --profile <profile> add dsh-plan-act-models@0.6.0
   ```
 - **直接从本仓库装**（不需要本地有 tarball）：装最新 Release 附件，或按 git 引用装源码——
 
   ```powershell
   dsh plugin --profile <profile> add "https://github.com/CynthiaYX/dsh-plan-act-models/releases/latest/download/dsh-plan-act-models.tgz"
   # 或锁定到某个 tag 的源码
-  dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.5.0"
+  dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.6.0"
   ```
 
-  三者都指向同一套文件；npm 包与 Release 附件是同一份 `npm pack` 产物（`v0.5.0` 的
-  sha1 都是 `dc9225bd`），`github:` 走整仓 tarball，仓库根就是包根，没有需要裁剪的子目录。
+  三者都指向同一套文件；npm 包与 Release 附件是同一份 `npm pack` 产物，
+  校验值每次发版都不同，按下文 `上传前清单` 第 5 条核对即可；
+  `github:` 走整仓 tarball，仓库根就是包根，没有需要裁剪的子目录。
 
-  > 当前最新 Release：**v0.5.0**（附件 `dsh-plan-act-models.tgz` 与
-  > `dsh-plan-act-models-0.5.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
+  > 当前最新 Release：**v0.6.0**（附件 `dsh-plan-act-models.tgz` 与
+  > `dsh-plan-act-models-0.6.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
   > 把 `latest` 换成新 tag 可以锁定版本。
 
 配置入口：**设置 → 模式与模型**（首次默认关闭自动切换）。
@@ -96,7 +97,7 @@ repository `dsh-plan-act-models`、workflow `release.yml`）。
 
 ### 上传前清单
 
-已发布到 npm（`dsh-plan-act-models`，`latest` = 0.5.0）。发布前依次确认：
+已发布到 npm（`dsh-plan-act-models`，`latest` = 0.6.0）。发布前依次确认：
 
 1. `node --test` 全绿（224 个用例）。
 2. `npm pack --dry-run` 的文件列表里没有 `lib/*.js`（该 glob 曾指向不存在的文件）。
