@@ -146,16 +146,29 @@ export function apply(ctx, config) {
    */
   const remembered = new WeakMap()
 
+  /**
+   * Sessions with a plan-mode switch that has been decided but not yet applied.
+   *
+   * Entering plan mode is announced from inside the `plan/mode` append, where
+   * the selection cannot be committed yet: the session is mid-publish, and
+   * committing appends a second event into the same window. So the intent is
+   * armed here and flushed as soon as the stack unwinds — or, when `/plan` also
+   * steers a message, as soon as the Agent leaves idle for that step, which is
+   * still earlier than `preStep` reading the model.
+   */
+  const armed = new WeakMap()
+
   ctx.inject(['settings'], (child) => {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
 
   const projections = () => ctx.get('sessionProjections')
-  const { assertServable } = createCatalog({ llm: () => ctx.get('llm'), ttlMs: CATALOG_TTL_MS })
+  const { servableNow, refresh } = createCatalog({ llm: () => ctx.get('llm'), ttlMs: CATALOG_TTL_MS })
   const select = createSwitcher({
     sessionController: () => ctx.get('sessionController'),
     projections,
-    assertServable,
+    servableNow,
+    warm: refresh,
     warn: (message) => ctx.logger?.warn?.(message),
   })
 
@@ -207,21 +220,35 @@ export function apply(ctx, config) {
     })
   }
 
-  /** Whether plan mode is on, whichever of the two signals this Host exposes. */
-  function planActiveOf(agent) {
+  /**
+   * Whether plan mode is on, whichever of the two signals this Host exposes.
+   *
+   * Returns `undefined` when nothing on this Host can answer, which is not the
+   * same as "off": the listener that armed the switch already saw the signal.
+   */
+  function planValueOf(agent) {
     try {
       const planMode = ctx.get('planMode')
       const verdict = planMode?.get?.(agent)
-      if (verdict !== undefined) return verdict?.active === true
+      // A queued flip (entry requested while a turn is open) is not committed
+      // until the next step boundary, but it is the user's current intent, and
+      // the instruction should not lag behind the switch by one step.
+      if (verdict !== undefined) return (verdict?.pending ?? verdict?.active) === true
     } catch {
       // Fall through to the projection: a Host without `planMode` still logs.
     }
     try {
       const state = projections()?.stateOf?.(agent?.session, 'plan')
+      if (state === undefined || state === null) return undefined
       return state?.active === true
     } catch {
-      return false
+      return undefined
     }
+  }
+
+  /** Whether plan mode is on, treating "cannot tell" as off for display. */
+  function planActiveOf(agent) {
+    return planValueOf(agent) === true
   }
 
   /**
@@ -291,6 +318,9 @@ export function apply(ctx, config) {
       })
       reportIncomplete(MODE_ACT, verdict)
       if (verdict.action !== 'select') return
+      // The approved plan supersedes any plan entry that is still queued, so a
+      // later flush cannot drag the session back onto the Plan route.
+      armed.delete(agent)
       // Remember before the switch lands: prompt assembly for the next step may
       // run before the selection projection settles.
       remembered.set(agent.session, MODE_ACT)
@@ -326,8 +356,31 @@ export function apply(ctx, config) {
     reportIncomplete(MODE_PLAN, verdict)
     if (verdict.action !== 'select') return
     remembered.set(session, MODE_PLAN)
-    schedule(select(agent, verdict.route, session.id))
+    // `plan/mode` is appended from inside the session's own publish, and the
+    // switch appends `model/selection`; doing it here would re-enter the append.
+    armed.set(agent, { session, route: verdict.route })
+    queueMicrotask(() => flushPlan(agent))
   })
+
+  /**
+   * Apply an armed plan-mode switch, if it is still wanted.
+   *
+   * Flushed from a microtask (enough for `/plan` and the chip: the user's next
+   * message starts the turn) and again from `agent/status` (needed for
+   * `/plan <message>`, which wakes the Agent inside the same stack). Whichever
+   * runs first wins; the intent is dropped either way.
+   */
+  function flushPlan(agent) {
+    const intent = armed.get(agent)
+    if (intent === undefined) return
+    armed.delete(agent)
+    // The arming listener saw `plan/mode active:true`; a Host that cannot
+    // report it back yet (`planMode.get()` returning nothing) must not cancel a
+    // decision it already announced. Only an explicit "off" cancels.
+    if (planValueOf(agent) === false) return
+    // The switcher drops a route the session already committed to.
+    schedule(select(agent, intent.route, intent.session.id))
+  }
 
   /**
    * Report a bug inside the plugin instead of letting it escape.
@@ -346,7 +399,7 @@ export function apply(ctx, config) {
     ctx.logger?.warn?.(`[plan-act-models] 无法为该会话挂载切换器，已跳过（其余会话不受影响）：${detail}`)
   }
 
-  /** Attach the Agent-scoped listener, once. */
+  /** Attach the Agent-scoped listeners, once. */
   function attach(raw) {
     const agent = agentOf(raw)
     if (agent === undefined || attached.has(agent)) return
@@ -354,6 +407,15 @@ export function apply(ctx, config) {
     attached.add(agent)
     try {
       agent.disposeToolResult = agent.ctx.on('tools/result', onToolResult(agent))
+      // `agent/status` is the moment an Agent leaves idle, which is the last
+      // chance to commit a selection before `preStep` reads it. Older Hosts do
+      // not emit it for a step that was woken in the same stack; the microtask
+      // in the plan listener already covers those.
+      if (typeof agent.model?.select === 'function') {
+        agent.disposeStatus = agent.ctx.on('agent/status', (payload) => {
+          if (payload?.status === 'running') flushPlan(agent)
+        })
+      }
       live.add(agent)
     } catch (error) {
       attached.delete(agent)
@@ -367,8 +429,11 @@ export function apply(ctx, config) {
       if (agent === undefined) return
       attached.delete(agent)
       live.delete(agent)
+      armed.delete(agent)
       agent.disposeToolResult?.()
       agent.disposeToolResult = undefined
+      agent.disposeStatus?.()
+      agent.disposeStatus = undefined
     } catch (error) {
       report(error)
     }

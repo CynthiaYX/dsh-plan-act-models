@@ -20,13 +20,13 @@
 
 ## 安装
 
-分发包是 `dsh-plan-act-models-0.6.0.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
+分发包是 `dsh-plan-act-models-0.6.1.tgz`（`npm pack` 产物，无运行期依赖、可离线安装）。
 完整步骤、验证清单与排错见 **[INSTALL.md](./INSTALL.md)**，安装路线摘录：
 
 - **桌面版**：应用内 **设置 → 插件 → 从本地文件安装** 选 tarball，然后重启应用。
   桌面 profile 由应用独占管理，外部 `dsh --profile desktop …` 会报
   `managed exclusively by the Electron application`。
-- **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.6.0.tgz"`，
+- **CLI / Web 普通 profile**：`dsh plugin --profile <profile> add "<绝对路径>\dsh-plan-act-models-0.6.1.tgz"`，
   Launcher 会自动把 bundle 写进 `dsh.profile.bundles`，然后重启。
 - **从 npm 装**（最省事，别人只需包名）：已发布到 npm，预构建安装不会触发
   `allowBuilds` 的构建授权流程——
@@ -34,22 +34,22 @@
   ```powershell
   dsh plugin --profile <profile> add dsh-plan-act-models
   # 锁定版本
-  dsh plugin --profile <profile> add dsh-plan-act-models@0.6.0
+  dsh plugin --profile <profile> add dsh-plan-act-models@0.6.1
   ```
 - **直接从本仓库装**（不需要本地有 tarball）：装最新 Release 附件，或按 git 引用装源码——
 
   ```powershell
   dsh plugin --profile <profile> add "https://github.com/CynthiaYX/dsh-plan-act-models/releases/latest/download/dsh-plan-act-models.tgz"
   # 或锁定到某个 tag 的源码
-  dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.6.0"
+  dsh plugin --profile <profile> add "github:CynthiaYX/dsh-plan-act-models#v0.6.1"
   ```
 
   三者都指向同一套文件；npm 包与 Release 附件是同一份 `npm pack` 产物，
   校验值每次发版都不同，按下文 `上传前清单` 第 5 条核对即可；
   `github:` 走整仓 tarball，仓库根就是包根，没有需要裁剪的子目录。
 
-  > 当前最新 Release：**v0.6.0**（附件 `dsh-plan-act-models.tgz` 与
-  > `dsh-plan-act-models-0.6.0.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
+  > 当前最新 Release：**v0.6.1**（附件 `dsh-plan-act-models.tgz` 与
+  > `dsh-plan-act-models-0.6.1.tgz`，两者 sha256 相同）。更新到新版只需重跑一次 `add`，
   > 把 `latest` 换成新 tag 可以锁定版本。
 
 配置入口：**设置 → 模式与模型**（首次默认关闭自动切换）。
@@ -97,9 +97,9 @@ repository `dsh-plan-act-models`、workflow `release.yml`）。
 
 ### 上传前清单
 
-已发布到 npm（`dsh-plan-act-models`，`latest` = 0.6.0）。发布前依次确认：
+已发布到 npm（`dsh-plan-act-models`，`latest` = 0.6.1）。发布前依次确认：
 
-1. `node --test` 全绿（224 个用例）。
+1. `node --test` 全绿（242 个用例）。
 2. `npm pack --dry-run` 的文件列表里没有 `lib/*.js`（该 glob 曾指向不存在的文件）。
 3. `package.json` 无 `private`，`license` 与 `repository` 齐全。**`repository.url` 必须在**：
    awesome-dsh-plugin 用 `scripts/probe-npm.mjs` 把 catalog 条目绑到 npm 包上，认的就是
@@ -229,6 +229,22 @@ composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（�
 以上两条都会**盖过**你当前选中的自定义模式（选的是自定义模式时，它们照常把模型切回 Plan / Act）。
 离开 plan 模式（`/plan off`、计划被取消）**不碰模型**。这就是本次改动脱钩的地方。
 
+### 切换一定要赶在那一步之前
+
+宿主从 0.2 起在 `preStep` 一开始就把「这一 step 用哪个模型」定死了，之后任何改动都会被
+`prepareRequest` 拒绝。而 `session.selectModel` 要先枚举 provider、再解析调用配置才落地，
+等它回来时请求早就发出去了 —— 表现出来就是「先发旧模型，一两秒后才切成新模型」。
+
+所以插件改成**先切、后验**：判定一出就同步提交选择，让紧接着的那一步直接用上新模型；
+随后仍走宿主的 `selectModel` 做校验与持久化，失败则回滚到原来的选择（若期间没有更新的选择覆盖它）。
+代价是配置写错时可能白跑一次请求；换来的是切换不再晚一步。
+
+- **批准计划（硬规则）**：`tools/result` 回调里同步提交，下一次 `preStep` 读到的就是 Act。
+- **进入 plan（软规则）**：`plan/mode` 是在会话自己的 append 栈里发出的，此时提交会撞上
+  "cannot reenter while another append is being published"，所以先记下意图，栈一展开就提交；
+  `/plan <消息>` 会在同一栈里接着拉起 turn，这种情况由 `agent/status` 转为 `running` 兜住。
+- 旧版宿主没有 `agent.model`，退回原来的异步路径：仍会切，只是晚一步。
+
 ## 状态说明
 
 设置页顶部会直接反映读取结果：
@@ -257,10 +273,12 @@ composer 底部、**原生模型选择器紧左边**，样式是一枚胶囊（�
    所以现在被跳过并在报错里点名版本。全都不可用时插件整体不加载——设置页显示「宿主没有提供配置项」，
    报错列出每条试过的路径，可用 `DSH_SCHEMASTER_ROOT` 指向副本目录。
 5. **自动切换失败只降级，不拖垮会话**：`selectModel` 被拒绝（模型不在目录里、连接不可用）时
-   插件只告警一次并跳过；`agent/created` 里挂载监听器抛出的异常同样就地吞掉，
-   否则那个 Agent 永远 publish 不出来。
-6. **挂载点只有两个事件**：每个 root Agent 的 `tools/result`（审批）与根平面的
-   `session/event`（`plan/mode`）。不再有请求期改写，所以没有「比宿主更早装监听器」的优先级问题。
+   插件只告警一次并跳过，同时把跳过前已提交的选择**回滚**到原来的那个 —— 除非用户期间已经
+   选了别的。`agent/created` 里挂载监听器抛出的异常同样就地吞掉，否则那个 Agent 永远
+   publish 不出来。
+6. **挂载点只有三个事件**：每个 root Agent 的 `tools/result`（审批）与 `agent/status`
+   （进入 plan 时补交选择），以及根平面的 `session/event`（`plan/mode`）。
+   仍没有请求期改写，所以没有「比宿主更早装监听器」的优先级问题。
 7. **下拉框沿用硬编码中文**：与设置页一致，没有走 Client locale 服务；`client.js` 里甚至不能出现
    `locale` 字样（`test/client.test.mjs` 有既有断言）。
 8. **`conversation.input.right` 目前无人占用**，所以我们的条目稳定落在模型选择器左侧；若将来有别的

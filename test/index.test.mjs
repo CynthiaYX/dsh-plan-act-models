@@ -92,9 +92,16 @@ function stubLlm(models = [{ id: 'm1' }]) {
   }
 }
 
-function newAgent(id, { cwd = 'C:/work', origin } = {}) {
+/**
+ * A fake Agent.
+ *
+ * @param options.model - when true, carry the `agent.model` surface a 0.2 Host
+ *   exposes; the 0.1 Host had none, and the plugin must work with both.
+ */
+function newAgent(id, { cwd = 'C:/work', origin, model = false } = {}) {
   const listeners = []
-  return {
+  let current = null
+  const agent = {
     id,
     ctx: {
       on: (name, fn) => {
@@ -111,6 +118,17 @@ function newAgent(id, { cwd = 'C:/work', origin } = {}) {
     },
     listeners,
   }
+  if (model) {
+    agent.model = {
+      current: () => current,
+      select: (selection) => {
+        current = { ...selection }
+      },
+    }
+    /** What the Agent would send the next request with. */
+    agent.committed = () => current
+  }
+  return agent
 }
 
 /**
@@ -122,7 +140,7 @@ function newAgent(id, { cwd = 'C:/work', origin } = {}) {
 function harness(overrides = {}) {
   const warnings = []
   const calls = []
-  const roots = overrides.roots ?? [newAgent('root-1')]
+  const roots = overrides.roots ?? [newAgent('root-1', { model: true })]
   const events = {}
   const agents = new Map((overrides.rootList ?? roots).map((agent) => [agent.id, agent]))
 
@@ -245,14 +263,22 @@ function promptService() {
   }
 }
 
-test('apply attaches exactly one tools/result listener per Agent', () => {
+test('apply attaches one tools/result and one agent/status listener per Agent', () => {
   // Regression guard for the released breakage: `attach` referenced a helper it
   // did not define, so this threw and the Host could not publish any Agent.
   const { roots } = harness()
   assert.deepEqual(
     roots[0].listeners.map((item) => item.name),
-    ['tools/result'],
+    ['tools/result', 'agent/status'],
   )
+})
+
+test('apply attaches only tools/result on a Host without agent.model', () => {
+  // 0.1 had no synchronous selection surface and no `agent/status` race to
+  // close, so the extra listener would only cost an event.
+  const old = newAgent('old')
+  const { roots } = harness({ roots: [old] })
+  assert.deepEqual(roots[0].listeners.map((item) => item.name), ['tools/result'])
 })
 
 test('apply survives with no pre-existing Agents', () => {
@@ -269,11 +295,11 @@ test('a load failure while attaching is reported once and never escapes', () => 
   // `attach` runs inside the Host's uncaught `agent/created` serial, so an
   // escaped throw takes the whole session down. One bad Agent must degrade to a
   // warning instead.
-  const broken = newAgent('broken')
+  const broken = newAgent('broken', { model: true })
   broken.ctx.on = () => {
     throw new Error('listener registration failed')
   }
-  const healthy = newAgent('healthy')
+  const healthy = newAgent('healthy', { model: true })
 
   const { warnings, agents } = harness({ roots: [], rootList: [broken, healthy] })
 
@@ -284,7 +310,7 @@ test('a load failure while attaching is reported once and never escapes', () => 
   )
   assert.deepEqual(
     healthy.listeners.map((item) => item.name),
-    ['tools/result'],
+    ['tools/result', 'agent/status'],
     'a healthy Agent must still be attached after a broken one',
   )
   assert.deepEqual([...agents.keys()].sort(), ['broken', 'healthy'])
@@ -301,11 +327,11 @@ test('a throwing dispose during teardown does not escape', () => {
 
 test('agent/created attaches and agent/disposed detaches', () => {
   const { events, agents } = harness({ roots: [], rootList: [] })
-  const agent = newAgent('late')
+  const agent = newAgent('late', { model: true })
   agents.set('late', agent)
 
   events['agent/created']({ agent })
-  assert.deepEqual(agent.listeners.map((item) => item.name), ['tools/result'])
+  assert.deepEqual(agent.listeners.map((item) => item.name), ['tools/result', 'agent/status'])
 
   events['agent/disposed']({ agent })
   assert.deepEqual(agent.listeners, [], 'disposal must unsubscribe every listener')
@@ -439,6 +465,97 @@ test('an approved plan that already committed the Act route is a no-op', async (
 
   assert.deepEqual(calls, [])
 })
+
+// --- the switch has to land before the step that uses it --------------------
+
+test('an approved plan commits the Act route synchronously', () => {
+  // `preStep` reads `model.current()` before any listener runs, so a switch that
+  // waits for `selectModel` (providers, then the call config) is one step late:
+  // the request goes out on the old model and the new one arrives afterwards.
+  const agent = newAgent('root-1', { model: true })
+  harness({ roots: [agent], selection: PLAN_ROUTE })
+
+  approvalEvent(agent, { approved: true })
+
+  assert.deepEqual(agent.committed(), ACT_ROUTE, 'committed inside the tools/result callback')
+})
+
+test('entering plan mode commits the Plan route before the next step', async () => {
+  const agent = newAgent('root-1', { model: true })
+  const { events } = harness({ roots: [agent] })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  // `plan/mode` is appended from inside the session's own publish, so the commit
+  // waits for that stack to unwind — a microtask, not a `selectModel` round trip.
+  await Promise.resolve()
+  await Promise.resolve()
+
+  assert.deepEqual(agent.committed(), PLAN_ROUTE)
+})
+
+test('the agent leaving idle commits an armed plan switch immediately', async () => {
+  // `/plan <message>` steers in the same stack as the mode flip, so the turn
+  // starts before any microtask runs. `agent/status` is the last synchronous
+  // signal available, and it still precedes `preStep`.
+  const agent = newAgent('root-1', { model: true })
+  const { events } = harness({ roots: [agent] })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  handlerFor(agent, 'agent/status')({ status: 'running' })
+
+  assert.deepEqual(agent.committed(), PLAN_ROUTE, 'committed without yielding')
+})
+
+test('an agent/status with no armed intent does nothing', async () => {
+  const agent = newAgent('root-1', { model: true })
+  const { calls } = harness({ roots: [agent] })
+
+  handlerFor(agent, 'agent/status')({ status: 'running' })
+  await settle()
+
+  assert.deepEqual(calls, [], 'idle-to-running is not a reason to switch on its own')
+})
+
+test('an approved plan cancels a plan switch that has not landed yet', async () => {
+  // Approve immediately after entering plan mode: the queued intent must not
+  // drag the session back to the Plan route after the Act commit.
+  const agent = newAgent('root-1', { model: true })
+  const { events } = harness({ roots: [agent] })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  approvalEvent(agent, { approved: true })
+  await settle()
+
+  assert.deepEqual(agent.committed(), ACT_ROUTE, 'Act wins; the plan intent is gone')
+})
+
+test('a plan switch abandoned by /plan off is not applied later', async () => {
+  const agent = newAgent('root-1', { model: true })
+  const planModeService = {
+    get: () => ({ active: false }),
+  }
+  const { events } = harness({
+    roots: [agent],
+    services: { planMode: planModeService },
+  })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
+
+  assert.equal(agent.committed(), null, 'the flip was undone before the switch could run')
+})
+
+test('an older Host still switches, it is only later', async () => {
+  // No `agent.model`: the switch has to go through `selectModel` alone.
+  const agent = newAgent('root-1')
+  const { events, calls } = harness({ roots: [agent] })
+
+  events['session/event'](agent.session, planMode(agent.session, true))
+  await settle()
+
+  assert.deepEqual(calls, [{ sessionId: 'root-1', ...PLAN_ROUTE }])
+})
+
 
 // --- custom modes are manual-only -----------------------------------------
 

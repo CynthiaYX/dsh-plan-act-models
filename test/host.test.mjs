@@ -45,13 +45,17 @@ test('trackWord names the two mode ids', () => {
 
 /**
  * A switcher wired to fakes.
+ *
  * @param options.controller - the `sessionController` service, or undefined.
  * @param options.state - the `modelSelection` projection state.
- * @param options.servable - thrown error for `assertServable`, if any.
+ * @param options.now - the synchronous catalog verdict: `null` for "no evidence
+ *   yet", or the refusal message the real catalog returns.
+ * @param options.warm - rejects/awaits on the background catalog refresh.
  */
-function switcherOf({ controller, state = null, servable = null } = {}) {
+function switcherOf({ controller, state = null, now = null, warm = undefined } = {}) {
   const warnings = []
   const calls = []
+  const warmed = []
   const service = controller === undefined || controller === null
     ? undefined
     : {
@@ -65,12 +69,38 @@ function switcherOf({ controller, state = null, servable = null } = {}) {
   const select = createSwitcher({
     sessionController: () => service,
     projections: () => (state === null ? undefined : projectionsOf(state)),
-    assertServable: async () => {
-      if (servable !== null) throw servable
-    },
+    servableNow: () => (now === null ? undefined : now),
+    warm: warm === undefined
+      ? undefined
+      : () => {
+          warmed.push(true)
+          return warm()
+        },
     warn: (message) => warnings.push(message),
   })
-  return { select, warnings, calls }
+  return { select, warnings, calls, warmed }
+}
+
+/**
+ * An Agent carrying the `agent.model` surface the 0.2 Host exposes.
+ * @param onSelect - called after the route is recorded, to assert ordering.
+ */
+function agentWithModel(onSelect = () => {}) {
+  let current = null
+  return {
+    id: 'sess-1',
+    ctx: {},
+    session: { header: { cwd: '/w' } },
+    model: {
+      current: () => current,
+      select: (selection) => {
+        const previous = current
+        current = { ...selection }
+        onSelect(selection, previous)
+      },
+    },
+    committed: () => current,
+  }
 }
 
 test('the switcher commits an unselected route through selectModel', async () => {
@@ -110,16 +140,51 @@ test('the switcher still commits when only the effort differs', async () => {
   assert.equal(calls.length, 1)
 })
 
-test('an unservable route is reported once and never reaches selectModel', async () => {
+test('the model is switched before the returned promise settles', async () => {
+  // The step that is about to run reads `model.current()` before any await in
+  // its own preparation; the whole point of the split is that this call has
+  // already landed by then, even though `selectModel` has not.
+  const agent = agentWithModel()
+  const { select } = switcherOf({ controller: {} })
+  const pending = select(agent, ACT_ROUTE, 'sess-1')
+  assert.deepEqual(agent.committed(), { ...ACT_ROUTE }, 'committed synchronously')
+  assert.equal(await pending, true)
+})
+
+test('a route the catalog already refused never reaches selectModel', async () => {
+  const agent = agentWithModel()
   const { select, calls, warnings } = switcherOf({
     controller: {},
-    servable: new Error('provider「p」下没有模型「m」'),
+    now: 'provider「p」下没有模型「m」',
   })
-  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), false)
-  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), false)
+  assert.equal(await select(agent, ACT_ROUTE, 'sess-1'), false)
+  assert.equal(await select(agent, ACT_ROUTE, 'sess-1'), false)
   assert.deepEqual(calls, [])
+  assert.equal(agent.committed(), null, 'the model is not touched either')
   assert.equal(warnings.length, 1, 'the catalog degradation is reported exactly once')
   assert.match(warnings[0], /不切换/)
+})
+
+test('an unknown catalog verdict does not block the switch', async () => {
+  // Nothing has been swept yet, so there is no evidence either way; the Host
+  // validates the route again on the way through `selectModel`.
+  const { select, calls, warnings } = switcherOf({ controller: {} })
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), true)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(warnings, [])
+})
+
+test('the catalog is refreshed in the background even while selectModel runs', async () => {
+  let release
+  const { select, warmed, calls } = switcherOf({
+    controller: () => new Promise((resolve) => { release = () => resolve({}) }),
+    warm: () => new Promise(() => {}),
+  })
+  const pending = select(AGENT, ACT_ROUTE, 'sess-1')
+  assert.equal(warmed.length, 1, 'the refresh started without waiting for it')
+  assert.equal(calls.length, 1)
+  release?.()
+  assert.equal(await pending, true)
 })
 
 test('a rejecting selectModel is contained and reported once', async () => {
@@ -133,6 +198,53 @@ test('a rejecting selectModel is contained and reported once', async () => {
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /切换模型失败/)
   assert.match(warnings[0], /model-unavailable/)
+})
+
+test('a rejected switch restores the selection it replaced', async () => {
+  const before = { provider: 'other', model: 'old', reasoningEffort: 'low' }
+  const agent = agentWithModel()
+  agent.model.select(before)
+  const { select } = switcherOf({
+    controller: () => {
+      throw new Error('session/model-unavailable')
+    },
+  })
+  assert.equal(await select(agent, ACT_ROUTE, 'sess-1'), false)
+  assert.deepEqual(agent.committed(), before, 'the old model is back')
+})
+
+test('a rejection does not undo a selection a newer switch already replaced', async () => {
+  let reject
+  const agent = agentWithModel()
+  const { select } = switcherOf({
+    controller: () => new Promise((_resolve, refuse) => { reject = refuse }),
+  })
+  const pending = select(agent, ACT_ROUTE, 'sess-1')
+  // A newer decision commits while the first request is still in flight.
+  const newer = { provider: 'cline-pass', model: 'other', reasoningEffort: 'high' }
+  agent.model.select(newer)
+  reject(new Error('session/model-unavailable'))
+  assert.equal(await pending, false)
+  assert.deepEqual(agent.committed(), newer, 'the newer choice survives')
+})
+
+test('an Agent without agent.model keeps the previous asynchronous behaviour', async () => {
+  // Older Hosts have no `agent.model`; nothing may throw, and the switch still
+  // reaches the Host's own path.
+  const { select, calls, warnings } = switcherOf({ controller: {} })
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), true)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(warnings, [])
+})
+
+test('the switcher never waits for the warm-up to fail', async () => {
+  const { select, warnings } = switcherOf({
+    controller: {},
+    warm: () => Promise.reject(new Error('provider list failed')),
+  })
+  assert.equal(await select(AGENT, ACT_ROUTE, 'sess-1'), true)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(warnings, [], 'a failed refresh is not a failed switch')
 })
 
 test('a missing sessionController degrades with a pointer to the native selector', async () => {
@@ -304,4 +416,42 @@ test('a missing llm service lets the switch through to the Host validator', asyn
   // hides `llm` from this plugin.
   const { assertServable } = catalogOf(undefined)
   await assert.doesNotReject(() => assertServable({ provider: 'p', model: 'm' }))
+})
+
+test('servableNow says nothing before the first successful sweep', () => {
+  // "Not looked yet" is not "broken": the switcher must not refuse a route on an
+  // answer the catalog never gave.
+  const { servableNow } = catalogOf(undefined)
+  assert.equal(servableNow({ provider: 'p', model: 'm' }), undefined)
+})
+
+test('servableNow answers from the last sweep without awaiting anything', async () => {
+  const llm = {
+    listProviders: () => [{ id: 'p' }],
+    listModels: async () => [{ id: 'm' }],
+    resolveModelInfo: async () => ({ reasoning: EFFORTS }),
+  }
+  const { refresh, servableNow } = catalogOf(llm)
+  assert.equal(servableNow({ provider: 'p', model: 'm' }), undefined, 'nothing swept yet')
+  await refresh()
+  assert.equal(servableNow({ provider: 'p', model: 'm', reasoningEffort: 'max' }), null)
+  assert.match(servableNow({ provider: 'p', model: 'other' }), /下没有模型「other」/)
+  assert.match(servableNow({ provider: 'nope', model: 'm' }), /provider「nope」不可用/)
+  assert.match(servableNow({ provider: 'p', model: 'm', reasoningEffort: 'low' }), /不支持思考等级/)
+})
+
+test('servableNow distinguishes "no evidence" from "a failed sweep"', async () => {
+  // A sweep that could not list providers leaves the catalog empty *and*
+  // unreported: reporting every route as broken would be a lie, so no evidence
+  // is the honest answer and the switcher proceeds optimistically.
+  const llm = {
+    listProviders: () => {
+      throw new Error('registry exploded')
+    },
+    listModels: async () => [],
+    resolveModelInfo: async () => ({ reasoning: undefined }),
+  }
+  const { refresh, servableNow } = catalogOf(llm)
+  await refresh()
+  assert.equal(servableNow({ provider: 'p', model: 'm' }), undefined)
 })
